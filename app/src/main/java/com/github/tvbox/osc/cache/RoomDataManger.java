@@ -10,6 +10,8 @@ import com.github.tvbox.osc.util.HistoryHelper;
 import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.bean.VodInfo;
 import com.github.tvbox.osc.data.AppDataManager;
+import com.github.tvbox.osc.data.HomeFolderIndexManager;
+import com.github.tvbox.osc.event.RefreshEvent;
 import com.github.tvbox.osc.util.StorageDriveType;
 import com.google.gson.ExclusionStrategy;
 import com.google.gson.FieldAttributes;
@@ -19,6 +21,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 import com.orhanobut.hawk.Hawk;
 
+import org.greenrobot.eventbus.EventBus;
+
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -180,5 +185,95 @@ public class RoomDataManger {
 
     public static void deleteDrive(int id) {
         AppDataManager.get().getStorageDriveDao().delete(id);
+    }
+
+    public static List<HomeFolderShortcut> getAllHomeFolderShortcuts() {
+        return AppDataManager.get().getHomeFolderShortcutDao().getAll();
+    }
+
+    public static HomeFolderShortcut getHomeFolderShortcut(int shortcutId) {
+        return AppDataManager.get().getHomeFolderShortcutDao().getById(shortcutId);
+    }
+
+    public static HomeFolderShortcut getHomeFolderShortcutByRootPath(@NonNull String rootPath) {
+        String normalizedPath = normalizeLocalRootPath(rootPath);
+        if (TextUtils.isEmpty(normalizedPath)) {
+            return null;
+        }
+        return AppDataManager.get().getHomeFolderShortcutDao().getByRootPath(normalizedPath);
+    }
+
+    public static HomeFolderShortcut insertHomeFolderShortcut(@NonNull String rootPath, String preferredName) {
+        String normalizedPath = normalizeLocalRootPath(rootPath);
+        if (TextUtils.isEmpty(normalizedPath)) {
+            return null;
+        }
+        HomeFolderShortcut existing = AppDataManager.get().getHomeFolderShortcutDao().getByRootPath(normalizedPath);
+        if (existing != null) {
+            return existing;
+        }
+        HomeFolderShortcut shortcut = new HomeFolderShortcut();
+        shortcut.rootPath = normalizedPath;
+        shortcut.name = buildShortcutName(normalizedPath, preferredName);
+        shortcut.sortOrder = AppDataManager.get().getHomeFolderShortcutDao().getMaxSortOrder() + 1;
+        shortcut.indexStatus = HomeFolderShortcut.STATUS_UNINDEXED;
+        long shortcutId = AppDataManager.get().getHomeFolderShortcutDao().insert(shortcut);
+        shortcut.setId((int) shortcutId);
+        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HOME_FOLDER_SHORTCUT_REFRESH));
+        return shortcut;
+    }
+
+    public static void deleteHomeFolderShortcut(int shortcutId) {
+        HomeFolderIndexManager.get().deleteShortcut(shortcutId);
+    }
+
+    public static List<HomeFolderIndexEntry> searchShortcutIndex(int shortcutId, String keyword) {
+        if (shortcutId <= 0 || TextUtils.isEmpty(keyword)) {
+            return new ArrayList<>();
+        }
+        return AppDataManager.get().getHomeFolderIndexEntryDao().searchByKeyword(shortcutId, escapeSqlLikeKeyword(keyword.trim()));
+    }
+
+    public static void rebuildShortcutIndex(int shortcutId) {
+        HomeFolderIndexManager.get().rebuildShortcutIndex(shortcutId);
+    }
+
+    public static void clearShortcutIndex(int shortcutId) {
+        HomeFolderIndexManager.get().clearShortcutIndex(shortcutId);
+    }
+
+    public static String normalizeLocalRootPath(String rootPath) {
+        if (TextUtils.isEmpty(rootPath)) {
+            return null;
+        }
+        String normalizedPath;
+        try {
+            normalizedPath = new File(rootPath).getCanonicalPath();
+        } catch (Exception e) {
+            normalizedPath = new File(rootPath).getAbsolutePath();
+        }
+        if (normalizedPath.length() > 1 && normalizedPath.endsWith(File.separator)) {
+            normalizedPath = normalizedPath.substring(0, normalizedPath.length() - 1);
+        }
+        return normalizedPath;
+    }
+
+    public static String buildShortcutName(String rootPath, String preferredName) {
+        if (!TextUtils.isEmpty(preferredName)) {
+            return preferredName.trim();
+        }
+        File file = new File(rootPath);
+        String name = file.getName();
+        if (!TextUtils.isEmpty(name)) {
+            return name;
+        }
+        return rootPath;
+    }
+
+    private static String escapeSqlLikeKeyword(String keyword) {
+        return keyword
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
     }
 }

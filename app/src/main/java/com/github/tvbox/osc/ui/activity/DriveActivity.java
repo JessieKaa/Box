@@ -1,23 +1,23 @@
 package com.github.tvbox.osc.ui.activity;
 
-import android.Manifest;
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
 import android.content.DialogInterface;
-import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.text.TextUtils;
 import android.view.View;
 import android.widget.ImageButton;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.DiffUtil;
 
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.base.BaseActivity;
 import com.github.tvbox.osc.bean.DriveFolderFile;
 import com.github.tvbox.osc.bean.VodInfo;
@@ -29,8 +29,11 @@ import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.dialog.AlistDriveDialog;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.ui.dialog.WebdavDialog;
+import com.github.tvbox.osc.util.DefaultConfig;
+import com.github.tvbox.osc.util.DrivePlayHelper;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
 import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.util.StorageRootFinder;
 import com.github.tvbox.osc.util.StorageDriveType;
 import com.github.tvbox.osc.util.StringUtils;
 import com.github.tvbox.osc.viewmodel.drive.AbstractDriveViewModel;
@@ -41,6 +44,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.hjq.permissions.OnPermissionCallback;
+import com.hjq.permissions.XXPermissions;
 import com.lzy.okgo.OkGo;
 import com.obsez.android.lib.filechooser.ChooserDialog;
 import com.orhanobut.hawk.Hawk;
@@ -64,6 +69,10 @@ import java.util.Locale;
 import me.jessyan.autosize.utils.AutoSizeUtils;
 
 public class DriveActivity extends BaseActivity {
+    public static final String EXTRA_LOCAL_ROOT_PATH = "extra_local_root_path";
+    public static final String EXTRA_LOCAL_ROOT_TITLE = "extra_local_root_title";
+
+    private static final int REQUEST_LOCAL_STORAGE_PERMISSION = 1;
 
     private TextView txtTitle;
     private TvRecyclerView mGridView;
@@ -80,8 +89,20 @@ public class DriveActivity extends BaseActivity {
     private boolean isInSearch = false;
 
     private boolean delMode = false;
+    private boolean pendingOpenLocalDriveDialog = false;
+    private boolean pendingOpenDirectLocalEntry = false;
+    private boolean isDirectLocalEntry = false;
+    private String directLocalRootPath;
+    private String directLocalRootTitle;
 
     private Handler mHandler = new Handler();
+
+    public static Intent newLocalRootIntent(Context context, String rootPath, String title) {
+        Intent intent = new Intent(context, DriveActivity.class);
+        intent.putExtra(EXTRA_LOCAL_ROOT_PATH, rootPath);
+        intent.putExtra(EXTRA_LOCAL_ROOT_TITLE, title);
+        return intent;
+    }
 
     @Override
     protected int getLayoutResID() {
@@ -90,6 +111,9 @@ public class DriveActivity extends BaseActivity {
 
     @Override
     protected void init() {
+        directLocalRootPath = RoomDataManger.normalizeLocalRootPath(getIntent().getStringExtra(EXTRA_LOCAL_ROOT_PATH));
+        directLocalRootTitle = getIntent().getStringExtra(EXTRA_LOCAL_ROOT_TITLE);
+        isDirectLocalEntry = !TextUtils.isEmpty(directLocalRootPath);
         initView();
         initData();
     }
@@ -127,6 +151,10 @@ public class DriveActivity extends BaseActivity {
             @Override
             public void onClick(View view) {
                 FastClickCheckUtil.check(view);
+                if (shouldShowAddShortcutAction()) {
+                    addCurrentFolderShortcut();
+                    return;
+                }
                 StorageDriveType.TYPE[] types = StorageDriveType.TYPE.values();
                 SelectDialog<StorageDriveType.TYPE> dialog = new SelectDialog<>(DriveActivity.this);
                 dialog.setTip("请选择存盘类型");
@@ -136,14 +164,12 @@ public class DriveActivity extends BaseActivity {
                     @Override
                     public void click(StorageDriveType.TYPE value, int pos) {
                         if (value == StorageDriveType.TYPE.LOCAL) {
-                            if (Build.VERSION.SDK_INT >= 23) {
-                                if (App.getInstance().checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                                    ActivityCompat.requestPermissions(DriveActivity.this,
-                                            new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
-                                    return;
+                            ensureLocalStoragePermission(new Runnable() {
+                                @Override
+                                public void run() {
+                                    openLocalDriveDialog();
                                 }
-                            }
-                            openFilePicker();
+                            });
                             dialog.dismiss();
                         } else if (value == StorageDriveType.TYPE.WEBDAV) {
                             openWebdavDialog(null);
@@ -267,9 +293,6 @@ public class DriveActivity extends BaseActivity {
     }
 
     private void playFile(String fileUrl) {
-        VodInfo vodInfo = new VodInfo();
-        vodInfo.name = "存储";
-        vodInfo.playFlag = "drive";
         DriveFolderFile currentDrive = viewModel.getCurrentDrive();
         if (currentDrive.getDriveType() == StorageDriveType.TYPE.WEBDAV) {
             String credentialStr = currentDrive.getWebDAVBase64Credential();
@@ -280,22 +303,11 @@ public class DriveActivity extends BaseActivity {
                         "{ \"name\": \"authorization\", \"value\": \"Basic " + credentialStr + "\" }");
                 headers.add(authorization);
                 playerConfig.add("headers", headers);
-                vodInfo.playerCfg = playerConfig.toString();
+                DrivePlayHelper.playFile(this, "存储", fileUrl, playerConfig.toString());
+                return;
             }
         }
-        vodInfo.seriesFlags = new ArrayList<>();
-        vodInfo.seriesFlags.add(new VodInfo.VodSeriesFlag("drive"));
-        vodInfo.seriesMap = new LinkedHashMap<>();
-        VodInfo.VodSeries series = new VodInfo.VodSeries(fileUrl, "tvbox-drive://" + fileUrl);
-        List<VodInfo.VodSeries> seriesList = new ArrayList<>();
-        seriesList.add(series);
-        vodInfo.seriesMap.put("drive", seriesList);
-        Bundle bundle = new Bundle();
-        bundle.putBoolean("newSource", true);
-        bundle.putString("sourceKey", "_drive");
-        bundle.putSerializable("VodInfo", vodInfo);
-        // takagen99 - to play file here zzzzzzzzzzzzzzz
-        jumpActivity(PlayActivity.class, bundle);
+        DrivePlayHelper.playFile(this, "存储", fileUrl);
     }
 
     private void openSortDialog() {
@@ -349,17 +361,147 @@ public class DriveActivity extends BaseActivity {
                 .withChosenListener(new ChooserDialog.Result() {
                     @Override
                     public void onChoosePath(String dir, File dirFile) {
-                        String absPath = dirFile.getAbsolutePath();
-                        for (DriveFolderFile drive : drives) {
-                            if (drive.getDriveType() == StorageDriveType.TYPE.LOCAL && absPath.equals(drive.getDriveData().name)) {
-                                Toast.makeText(mContext, "此文件夹之前已被添加到空间列表！", Toast.LENGTH_SHORT).show();
-                                return;
-                            }
-                        }
-                        RoomDataManger.insertDriveRecord(absPath, StorageDriveType.TYPE.LOCAL, null);
-                        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_DRIVE_REFRESH));
+                        addLocalDrive(dirFile.getAbsolutePath());
                     }
                 }).show();
+    }
+
+    private void openLocalDriveDialog() {
+        List<LocalDriveOption> options = new ArrayList<>();
+        for (StorageRootFinder.StorageRoot root : StorageRootFinder.find(this)) {
+            options.add(LocalDriveOption.fromRoot(root));
+        }
+        options.add(LocalDriveOption.manual());
+
+        SelectDialog<LocalDriveOption> dialog = new SelectDialog<>(DriveActivity.this);
+        dialog.setTip("请选择本地存储");
+        dialog.setItemCheckDisplay(false);
+        dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<LocalDriveOption>() {
+            @Override
+            public void click(LocalDriveOption value, int pos) {
+                if (value.manual) {
+                    openFilePicker();
+                } else {
+                    addLocalDrive(value.path);
+                }
+                dialog.dismiss();
+            }
+
+            @Override
+            public String getDisplay(LocalDriveOption val) {
+                return val.displayName;
+            }
+        }, new DiffUtil.ItemCallback<LocalDriveOption>() {
+            @Override
+            public boolean areItemsTheSame(@NonNull @NotNull LocalDriveOption oldItem, @NonNull @NotNull LocalDriveOption newItem) {
+                return oldItem.path.equals(newItem.path);
+            }
+
+            @Override
+            public boolean areContentsTheSame(@NonNull @NotNull LocalDriveOption oldItem, @NonNull @NotNull LocalDriveOption newItem) {
+                return oldItem.displayName.equals(newItem.displayName) && oldItem.manual == newItem.manual;
+            }
+        }, options, 0);
+        dialog.show();
+    }
+
+    private void addLocalDrive(String absPath) {
+        for (DriveFolderFile drive : drives) {
+            if (drive.getDriveType() == StorageDriveType.TYPE.LOCAL && absPath.equals(drive.getDriveData().name)) {
+                Toast.makeText(mContext, "此文件夹之前已被添加到空间列表！", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+        RoomDataManger.insertDriveRecord(absPath, StorageDriveType.TYPE.LOCAL, null);
+        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_DRIVE_REFRESH));
+    }
+
+    private void ensureLocalStoragePermission(Runnable onGranted) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (XXPermissions.isGranted(this, DefaultConfig.StoragePermissionGroup())) {
+                onGranted.run();
+                return;
+            }
+            XXPermissions.with(this)
+                    .permission(DefaultConfig.StoragePermissionGroup())
+                    .request(new OnPermissionCallback() {
+                        @Override
+                        public void onGranted(List<String> permissions, boolean all) {
+                            if (all && onGranted != null) {
+                                onGranted.run();
+                            }
+                        }
+
+                        @Override
+                        public void onDenied(List<String> permissions, boolean never) {
+                            if (never) {
+                                Toast.makeText(mContext, "存储权限被永久拒绝，请前往设置开启", Toast.LENGTH_SHORT).show();
+                                XXPermissions.startPermissionActivity((Activity) mContext, permissions);
+                            } else {
+                                Toast.makeText(mContext, "未获取到存储权限", Toast.LENGTH_SHORT).show();
+                            }
+                            if (isDirectLocalEntry) {
+                                finish();
+                            }
+                        }
+                    });
+            return;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !hasPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            if (isDirectLocalEntry) {
+                pendingOpenDirectLocalEntry = true;
+            } else {
+                pendingOpenLocalDriveDialog = true;
+            }
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_LOCAL_STORAGE_PERMISSION);
+            return;
+        }
+        onGranted.run();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_LOCAL_STORAGE_PERMISSION) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (granted) {
+                if (pendingOpenLocalDriveDialog) {
+                    pendingOpenLocalDriveDialog = false;
+                    openLocalDriveDialog();
+                } else if (pendingOpenDirectLocalEntry) {
+                    pendingOpenDirectLocalEntry = false;
+                    openDirectLocalEntry();
+                }
+            } else if (!granted) {
+                pendingOpenLocalDriveDialog = false;
+                pendingOpenDirectLocalEntry = false;
+                Toast.makeText(mContext, "未获取到存储权限", Toast.LENGTH_SHORT).show();
+                if (isDirectLocalEntry) {
+                    finish();
+                }
+            }
+        }
+    }
+
+    private static class LocalDriveOption {
+        public final String path;
+        public final String displayName;
+        public final boolean manual;
+
+        private LocalDriveOption(String path, String displayName, boolean manual) {
+            this.path = path;
+            this.displayName = displayName;
+            this.manual = manual;
+        }
+
+        public static LocalDriveOption fromRoot(StorageRootFinder.StorageRoot root) {
+            return new LocalDriveOption(root.path, root.label + "  " + root.path, false);
+        }
+
+        public static LocalDriveOption manual() {
+            return new LocalDriveOption("__manual__", "手动选择文件夹", true);
+        }
     }
 
     private void openWebdavDialog(StorageDrive drive) {
@@ -399,6 +541,15 @@ public class DriveActivity extends BaseActivity {
     }
 
     private void initData() {
+        if (isDirectLocalEntry) {
+            ensureLocalStoragePermission(new Runnable() {
+                @Override
+                public void run() {
+                    openDirectLocalEntry();
+                }
+            });
+            return;
+        }
         this.txtTitle.setText(getString(R.string.act_drive));
         sortType = Hawk.get(HawkConfig.STORAGE_DRIVE_SORT, 0);
         btnSort.setVisibility(View.GONE);
@@ -414,9 +565,23 @@ public class DriveActivity extends BaseActivity {
         }
         adapter.setNewData(drives);
         this.setSelectedItem(drives);
-        this.btnAddServer.setVisibility(View.VISIBLE);
-        this.btnRemoveServer.setVisibility(View.VISIBLE);
+        updateToolbarActions();
         showSuccess();
+    }
+
+    private void openDirectLocalEntry() {
+        this.txtTitle.setText(TextUtils.isEmpty(directLocalRootTitle) ? directLocalRootPath : directLocalRootTitle);
+        sortType = Hawk.get(HawkConfig.STORAGE_DRIVE_SORT, 0);
+        drives = new ArrayList<>();
+        StorageDrive storageDrive = new StorageDrive();
+        storageDrive.name = directLocalRootPath;
+        storageDrive.type = StorageDriveType.TYPE.LOCAL.ordinal();
+        DriveFolderFile drive = new DriveFolderFile(storageDrive);
+        viewModel = new LocalDriveViewModel();
+        viewModel.setCurrentDrive(drive);
+        viewModel.setCurrentDriveNote(null);
+        updateToolbarActions();
+        loadDriveData();
     }
 
     private void setSelectedItem(List<DriveFolderFile> list) {
@@ -436,6 +601,7 @@ public class DriveActivity extends BaseActivity {
     }
 
     private void loadDriveData() {
+        updateToolbarActions();
         viewModel.setSortType(sortType);
         btnSort.setVisibility(View.VISIBLE);
         showLoading();
@@ -446,6 +612,7 @@ public class DriveActivity extends BaseActivity {
                     @Override
                     public void run() {
                         showSuccess();
+                        updateToolbarActions();
                         if (alreadyHasChildren) {
                             adapter.setNewData(viewModel.getCurrentDriveNote().getChildren());
                             setSelectedItem(viewModel.getCurrentDriveNote().getChildren());
@@ -469,14 +636,30 @@ public class DriveActivity extends BaseActivity {
                 mHandler.post(new Runnable() {
                     @Override
                     public void run() {
+                        updateToolbarActions();
                         Toast.makeText(mContext, message, Toast.LENGTH_SHORT).show();
+                        if (isDirectLocalEntry) {
+                            finish();
+                        }
                     }
                 });
             }
         });
         if (StringUtils.isNotEmpty(path)) {
-            this.txtTitle.setText(path);
+            this.txtTitle.setText(getDisplayTitle(path));
         }
+    }
+
+    private String getDisplayTitle(String fallbackPath) {
+        if (isDirectLocalEntry
+                && !TextUtils.isEmpty(directLocalRootTitle)
+                && viewModel != null
+                && viewModel.getCurrentDriveNote() != null
+                && viewModel.getCurrentDriveNote().parentFolder == null
+                && TextUtils.isEmpty(viewModel.getCurrentDriveNote().name)) {
+            return directLocalRootTitle;
+        }
+        return fallbackPath;
     }
 
     private void cancel() {
@@ -508,7 +691,13 @@ public class DriveActivity extends BaseActivity {
                 viewModel = null;
                 return;
             }
+            if (isDirectLocalEntry) {
+                viewModel = null;
+                finish();
+                return;
+            }
             viewModel = null;
+            updateToolbarActions();
             initData();
             return;
         }
@@ -523,6 +712,10 @@ public class DriveActivity extends BaseActivity {
             returnPreviousFolder();
             return;
         }
+        if (isDirectLocalEntry) {
+            finish();
+            return;
+        }
         if (!delMode)
             super.onBackPressed();
         else
@@ -532,9 +725,62 @@ public class DriveActivity extends BaseActivity {
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void refresh(RefreshEvent event) {
         if (event.type == RefreshEvent.TYPE_DRIVE_REFRESH) {
+            if (isDirectLocalEntry) {
+                return;
+            }
             drives = null;
             initData();
         }
+    }
+
+    private void updateToolbarActions() {
+        if (viewModel == null) {
+            btnAddServer.setVisibility(View.VISIBLE);
+            btnRemoveServer.setVisibility(isDirectLocalEntry ? View.GONE : View.VISIBLE);
+            btnSort.setVisibility(View.GONE);
+            return;
+        }
+        btnRemoveServer.setVisibility(View.GONE);
+        btnAddServer.setVisibility(shouldShowAddShortcutAction() ? View.VISIBLE : View.GONE);
+    }
+
+    private boolean shouldShowAddShortcutAction() {
+        return viewModel != null
+                && viewModel.getCurrentDrive() != null
+                && viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.LOCAL
+                && !TextUtils.isEmpty(getCurrentLocalDirectoryPath());
+    }
+
+    private String getCurrentLocalDirectoryPath() {
+        if (viewModel == null || viewModel.getCurrentDrive() == null || viewModel.getCurrentDriveNote() == null) {
+            return null;
+        }
+        if (viewModel.getCurrentDrive().getDriveType() != StorageDriveType.TYPE.LOCAL) {
+            return null;
+        }
+        return RoomDataManger.normalizeLocalRootPath(viewModel.getCurrentDrive().name
+                + viewModel.getCurrentDriveNote().getAccessingPathStr()
+                + viewModel.getCurrentDriveNote().name);
+    }
+
+    private void addCurrentFolderShortcut() {
+        String currentPath = getCurrentLocalDirectoryPath();
+        if (TextUtils.isEmpty(currentPath)) {
+            Toast.makeText(mContext, "当前目录不可添加", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (RoomDataManger.getHomeFolderShortcutByRootPath(currentPath) != null) {
+            Toast.makeText(mContext, "该目录已添加到首页", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String shortcutName = RoomDataManger.buildShortcutName(currentPath, null);
+        com.github.tvbox.osc.cache.HomeFolderShortcut shortcut = RoomDataManger.insertHomeFolderShortcut(currentPath, shortcutName);
+        if (shortcut == null) {
+            Toast.makeText(mContext, "添加首页失败", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        RoomDataManger.rebuildShortcutIndex(shortcut.getId());
+        Toast.makeText(mContext, "已添加到首页并开始索引", Toast.LENGTH_SHORT).show();
     }
 
     @Override

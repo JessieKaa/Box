@@ -9,6 +9,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.recyclerview.widget.DiffUtil;
 
@@ -37,6 +38,7 @@ import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.HistoryHelper;
 import com.github.tvbox.osc.util.OkGoHelper;
 import com.github.tvbox.osc.util.PlayerHelper;
+import com.github.tvbox.osc.util.WebViewDataManager;
 import com.lzy.okgo.OkGo;
 import com.lzy.okgo.callback.FileCallback;
 import com.lzy.okgo.model.Progress;
@@ -597,6 +599,42 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 dialog.show();
             }
         });
+        findViewById(R.id.llClearCookie).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FastClickCheckUtil.check(v);
+                confirmWebViewCleanup(getString(R.string.mn_webview_cookie), getString(R.string.dia_clear_cookie), new Runnable() {
+                    @Override
+                    public void run() {
+                        WebViewDataManager.clearCookies(mActivity, new WebViewDataManager.ClearCallback() {
+                            @Override
+                            public void onComplete(boolean success) {
+                                if (mActivity == null) return;
+                                mActivity.runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        Toast.makeText(mActivity, getString(R.string.hm_cookie_del), Toast.LENGTH_SHORT).show();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        findViewById(R.id.llClearWebViewData).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FastClickCheckUtil.check(v);
+                confirmWebViewCleanup(getString(R.string.mn_webview_data), getString(R.string.dia_clear_webview_data), new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean success = WebViewDataManager.clearWebViewData(mActivity);
+                        Toast.makeText(mActivity, getString(success ? R.string.hm_webview_data_del : R.string.hm_webview_data_del_fail), Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
         // Select Backup / Restore -------------------------------------
         findViewById(R.id.llBackup).setOnClickListener(new View.OnClickListener() {
             @Override
@@ -818,6 +856,20 @@ public class ModelSettingFragment extends BaseLazyFragment {
             }
         };
 
+    }
+
+    private void confirmWebViewCleanup(String title, String message, Runnable onConfirm) {
+        new AlertDialog.Builder(mActivity)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (onConfirm != null) onConfirm.run();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     @Override

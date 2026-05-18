@@ -47,6 +47,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.IDN;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -137,9 +138,43 @@ public class ApiConfig {
         return "".getBytes();
     }
 
+    private static boolean isQuote(char value) {
+        return value == '\'' || value == '"' || value == '‘' || value == '’' || value == '“' || value == '”';
+    }
+
+    private static String sanitizeApiInput(String value) {
+        if (value == null) return "";
+        String result = value.trim();
+        while (result.length() > 1 && isQuote(result.charAt(0)) && isQuote(result.charAt(result.length() - 1))) {
+            result = result.substring(1, result.length() - 1).trim();
+        }
+        return result;
+    }
+
+    private static String normalizeHttpUrl(String value) {
+        if (TextUtils.isEmpty(value)) return value;
+        try {
+            Uri uri = Uri.parse(value);
+            String host = uri.getHost();
+            if (TextUtils.isEmpty(host)) return value;
+            String asciiHost = IDN.toASCII(host);
+            if (host.equals(asciiHost)) return value;
+            String userInfo = uri.getEncodedUserInfo();
+            int port = uri.getPort();
+            StringBuilder authority = new StringBuilder();
+            if (!TextUtils.isEmpty(userInfo)) authority.append(userInfo).append("@");
+            authority.append(asciiHost);
+            if (port != -1) authority.append(":").append(port);
+            return uri.buildUpon().encodedAuthority(authority.toString()).build().toString();
+        } catch (Throwable th) {
+            th.printStackTrace();
+            return value;
+        }
+    }
+
     public void loadConfig(boolean useCache, LoadConfigCallback callback, Activity activity) {
         // Embedded Source : Update in Strings.xml if required
-        String apiUrl = Hawk.get(HawkConfig.API_URL, HomeActivity.getRes().getString(R.string.app_source));
+        String apiUrl = sanitizeApiInput(Hawk.get(HawkConfig.API_URL, HomeActivity.getRes().getString(R.string.app_source)));
         if (apiUrl.isEmpty()) {
             callback.error("源地址为空");
             return;
@@ -161,16 +196,17 @@ public class ApiConfig {
             if (apiUrl.startsWith("clan")) {
                 configUrl = clanToAddress(a[0]);
             } else if (apiUrl.startsWith("http")) {
-                configUrl = a[0];
+                configUrl = normalizeHttpUrl(a[0]);
             } else {
-                configUrl = "http://" + a[0];
+                configUrl = normalizeHttpUrl("http://" + a[0]);
             }
         } else if (apiUrl.startsWith("clan")) {
             configUrl = clanToAddress(apiUrl);
         } else if (!apiUrl.startsWith("http")) {
-            configUrl = "http://" + configUrl;
+            configUrl = normalizeHttpUrl("http://" + apiUrl);
         } else {
-            configUrl = apiUrl;
+
+            configUrl = normalizeHttpUrl(apiUrl);
         }
         System.out.println("API URL :" + configUrl);
         String configKey = TempKey;

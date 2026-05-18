@@ -2,21 +2,29 @@ package com.github.tvbox.osc.ui.fragment;
 
 import android.content.Intent;
 import android.os.Bundle;
+import android.text.TextUtils;
 import android.view.View;
 import android.view.animation.BounceInterpolator;
 import android.widget.LinearLayout;
 import android.widget.Toast;
 
+import androidx.recyclerview.widget.DiffUtil;
+
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.base.BaseLazyFragment;
+import com.github.tvbox.osc.cache.HomeFolderShortcut;
 import com.github.tvbox.osc.bean.Movie;
 import com.github.tvbox.osc.bean.VodInfo;
 import com.github.tvbox.osc.cache.RoomDataManger;
+import com.github.tvbox.osc.event.RefreshEvent;
 import com.github.tvbox.osc.event.ServerEvent;
 import com.github.tvbox.osc.ui.activity.*;
+import com.github.tvbox.osc.ui.adapter.HomeFolderShortcutAdapter;
 import com.github.tvbox.osc.ui.adapter.HomeHotVodAdapter;
+import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
+import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
 import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.UA;
@@ -53,10 +61,13 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
     private LinearLayout tvHistory;
     private LinearLayout tvCollect;
     private LinearLayout tvPush;
+    private LinearLayout folderShortcutSection;
     public static HomeHotVodAdapter homeHotVodAdapter;
+    private HomeFolderShortcutAdapter homeFolderShortcutAdapter;
     private List<Movie.Video> homeSourceRec;
     public static TvRecyclerView tvHotListForGrid;
     public static TvRecyclerView tvHotListForLine;
+    private TvRecyclerView tvFolderShortcutList;
 
     public static UserFragment newInstance() {
         return new UserFragment();
@@ -87,6 +98,7 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
         }
 
         super.onFragmentResume();
+        refreshHomeFolderShortcuts();
         if (Hawk.get(HawkConfig.HOME_REC, 0) == 2) {
             List<VodInfo> allVodRecord = RoomDataManger.getAllVodRecord(20);
             List<Movie.Video> vodList = new ArrayList<>();
@@ -119,6 +131,8 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
         tvCollect = findViewById(R.id.tvFavorite);
         tvHistory = findViewById(R.id.tvHistory);
         tvPush = findViewById(R.id.tvPush);
+        folderShortcutSection = findViewById(R.id.folderShortcutSection);
+        tvFolderShortcutList = findViewById(R.id.tvFolderShortcutList);
         tvDrive.setOnClickListener(this);
         tvLive.setOnClickListener(this);
         tvSearch.setOnClickListener(this);
@@ -133,6 +147,46 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
         tvHistory.setOnFocusChangeListener(focusChangeListener);
         tvPush.setOnFocusChangeListener(focusChangeListener);
         tvCollect.setOnFocusChangeListener(focusChangeListener);
+        tvFolderShortcutList.setHasFixedSize(true);
+        tvFolderShortcutList.setLayoutManager(new com.owen.tvrecyclerview.widget.V7LinearLayoutManager(this.mContext, com.owen.tvrecyclerview.widget.V7LinearLayoutManager.HORIZONTAL, false));
+        homeFolderShortcutAdapter = new HomeFolderShortcutAdapter();
+        tvFolderShortcutList.setAdapter(homeFolderShortcutAdapter);
+        tvFolderShortcutList.setOnItemListener(new TvRecyclerView.OnItemListener() {
+            @Override
+            public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
+                itemView.animate().scaleX(1.0f).scaleY(1.0f).setDuration(300).setInterpolator(new BounceInterpolator()).start();
+            }
+
+            @Override
+            public void onItemSelected(TvRecyclerView parent, View itemView, int position) {
+                itemView.animate().scaleX(1.05f).scaleY(1.05f).setDuration(300).setInterpolator(new BounceInterpolator()).start();
+            }
+
+            @Override
+            public void onItemClick(TvRecyclerView parent, View itemView, int position) {
+            }
+        });
+        homeFolderShortcutAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
+            @Override
+            public void onItemClick(BaseQuickAdapter adapter, View view, int position) {
+                HomeFolderShortcut shortcut = homeFolderShortcutAdapter.getItem(position);
+                if (shortcut == null) {
+                    return;
+                }
+                startActivity(DriveActivity.newLocalRootIntent(mContext, shortcut.rootPath, shortcut.name));
+            }
+        });
+        homeFolderShortcutAdapter.setOnItemLongClickListener(new BaseQuickAdapter.OnItemLongClickListener() {
+            @Override
+            public boolean onItemLongClick(BaseQuickAdapter adapter, View view, int position) {
+                HomeFolderShortcut shortcut = homeFolderShortcutAdapter.getItem(position);
+                if (shortcut == null) {
+                    return true;
+                }
+                showFolderShortcutActions(shortcut);
+                return true;
+            }
+        });
         tvHotListForLine = findViewById(R.id.tvHotListForLine);
         tvHotListForGrid = findViewById(R.id.tvHotListForGrid);
         tvHotListForGrid.setHasFixedSize(true);
@@ -254,6 +308,7 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
         tvHotListForLine.setAdapter(homeHotVodAdapter);
 
         initHomeHotVod(homeHotVodAdapter);
+        refreshHomeFolderShortcuts();
 
         // Swifly: Home Style
         if (Hawk.get(HawkConfig.HOME_REC_STYLE, false)) {
@@ -367,9 +422,73 @@ public class UserFragment extends BaseLazyFragment implements View.OnClickListen
         }
     }
 
+    private void refreshHomeFolderShortcuts() {
+        if (folderShortcutSection == null || homeFolderShortcutAdapter == null) {
+            return;
+        }
+        List<HomeFolderShortcut> shortcuts = RoomDataManger.getAllHomeFolderShortcuts();
+        folderShortcutSection.setVisibility(shortcuts.isEmpty() ? View.GONE : View.VISIBLE);
+        homeFolderShortcutAdapter.setNewData(shortcuts);
+    }
+
+    private void showFolderShortcutActions(HomeFolderShortcut shortcut) {
+        List<String> options = new ArrayList<>();
+        options.add("搜索索引");
+        options.add("重建索引");
+        options.add("清除索引");
+        options.add("移除快捷方式");
+        SelectDialog<String> dialog = new SelectDialog<>(mContext);
+        dialog.setTip(shortcut.name);
+        dialog.setItemCheckDisplay(false);
+        dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<String>() {
+            @Override
+            public void click(String value, int pos) {
+                dialog.dismiss();
+                if ("搜索索引".equals(value)) {
+                    Intent intent = new Intent(mContext, FolderIndexSearchActivity.class);
+                    intent.putExtra(FolderIndexSearchActivity.EXTRA_SHORTCUT_ID, shortcut.getId());
+                    intent.putExtra(FolderIndexSearchActivity.EXTRA_SHORTCUT_NAME, shortcut.name);
+                    startActivity(intent);
+                } else if ("重建索引".equals(value)) {
+                    RoomDataManger.rebuildShortcutIndex(shortcut.getId());
+                    Toast.makeText(mContext, "已开始重建索引", Toast.LENGTH_SHORT).show();
+                } else if ("清除索引".equals(value)) {
+                    RoomDataManger.clearShortcutIndex(shortcut.getId());
+                    Toast.makeText(mContext, "已清除索引", Toast.LENGTH_SHORT).show();
+                } else if ("移除快捷方式".equals(value)) {
+                    RoomDataManger.deleteHomeFolderShortcut(shortcut.getId());
+                    Toast.makeText(mContext, "已移除快捷方式", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public String getDisplay(String val) {
+                return val;
+            }
+        }, new DiffUtil.ItemCallback<String>() {
+            @Override
+            public boolean areItemsTheSame(String oldItem, String newItem) {
+                return TextUtils.equals(oldItem, newItem);
+            }
+
+            @Override
+            public boolean areContentsTheSame(String oldItem, String newItem) {
+                return TextUtils.equals(oldItem, newItem);
+            }
+        }, options, 0);
+        dialog.show();
+    }
+
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void server(ServerEvent event) {
         if (event.type == ServerEvent.SERVER_CONNECTION) {
+        }
+    }
+
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void refresh(RefreshEvent event) {
+        if (event.type == RefreshEvent.TYPE_HOME_FOLDER_SHORTCUT_REFRESH) {
+            refreshHomeFolderShortcuts();
         }
     }
 

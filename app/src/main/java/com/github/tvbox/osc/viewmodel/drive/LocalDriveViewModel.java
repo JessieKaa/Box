@@ -18,8 +18,15 @@ public class LocalDriveViewModel extends AbstractDriveViewModel {
         if (currentDriveNote == null)
             currentDriveNote = new DriveFolderFile(null, "", 0, false, null, null);
         String path = currentDrive.name + currentDriveNote.getAccessingPathStr() + currentDriveNote.name;
+        File currentDir = new File(path);
+        if (!currentDir.exists() || !currentDir.isDirectory() || !currentDir.canRead()) {
+            if (callback != null) {
+                callback.fail("目录不存在或不可访问");
+            }
+            return path;
+        }
         if (currentDriveNote.getChildren() == null) {
-            File[] files = (new File(path)).listFiles();
+            File[] files = currentDir.listFiles();
             List<DriveFolderFile> items = new ArrayList<>();
             if (files != null) {
                 for (File file : files) {

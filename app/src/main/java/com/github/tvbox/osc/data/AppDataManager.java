@@ -22,7 +22,7 @@ import java.io.IOException;
  * @since 2020/5/15
  */
 public class AppDataManager {
-    private static final int DB_FILE_VERSION = 3;
+    private static final int DB_FILE_VERSION = 4;
     private static final String DB_NAME = "tvbox";
     private static volatile AppDataManager manager;
     private static AppDataBase dbInstance;
@@ -75,8 +75,49 @@ public class AppDataManager {
             }
         }
     };
+
+    static final Migration MIGRATION_3_4 = new Migration(3, 4) {
+        @Override
+        public void migrate(SupportSQLiteDatabase database) {
+            try {
+                database.execSQL("CREATE TABLE IF NOT EXISTS `homeFolderShortcut` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT, `rootPath` TEXT NOT NULL, `sortOrder` INTEGER NOT NULL, `indexStatus` INTEGER NOT NULL, `indexedFileCount` INTEGER NOT NULL, `lastIndexedAt` INTEGER NOT NULL, `lastError` TEXT)");
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_homeFolderShortcut_rootPath` ON `homeFolderShortcut` (`rootPath`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_homeFolderShortcut_sortOrder` ON `homeFolderShortcut` (`sortOrder`)");
+                database.execSQL("CREATE TABLE IF NOT EXISTS `homeFolderIndexEntry` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `shortcutId` INTEGER NOT NULL, `absolutePath` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `fileName` TEXT NOT NULL, `fileType` TEXT, `lastModified` INTEGER NOT NULL, `fileSize` INTEGER NOT NULL, FOREIGN KEY(`shortcutId`) REFERENCES `homeFolderShortcut`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_homeFolderIndexEntry_shortcutId` ON `homeFolderIndexEntry` (`shortcutId`)");
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_homeFolderIndexEntry_shortcutId_absolutePath` ON `homeFolderIndexEntry` (`shortcutId`, `absolutePath`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_homeFolderIndexEntry_fileName` ON `homeFolderIndexEntry` (`fileName`)");
+            } catch (SQLiteException e) {
+                e.printStackTrace();
+            }
+        }
+    };
+
     static String dbPath() {
         return DB_NAME + ".v" + DB_FILE_VERSION + ".db";
+    }
+
+    private static String dbPath(int version) {
+        return DB_NAME + ".v" + version + ".db";
+    }
+
+    private static void migrateLegacyDbFileIfNeeded() {
+        File latestDb = App.getInstance().getDatabasePath(dbPath());
+        if (latestDb.exists()) {
+            return;
+        }
+        File legacyDb = App.getInstance().getDatabasePath(dbPath(3));
+        if (!legacyDb.exists()) {
+            return;
+        }
+        if (!latestDb.getParentFile().exists()) {
+            latestDb.getParentFile().mkdirs();
+        }
+        try {
+            FileUtils.copyFile(legacyDb, latestDb);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public static AppDataBase get() {
@@ -84,10 +125,13 @@ public class AppDataManager {
             throw new RuntimeException("AppDataManager is no init");
         }
         if (dbInstance == null)
+            migrateLegacyDbFileIfNeeded();
+        if (dbInstance == null)
             dbInstance = Room.databaseBuilder(App.getInstance(), AppDataBase.class, dbPath())
                     .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
                     .addMigrations(MIGRATION_1_2)
                     .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_3_4)
                     .addCallback(new RoomDatabase.Callback() {
                         @Override
                         public void onCreate(@NonNull SupportSQLiteDatabase db) {

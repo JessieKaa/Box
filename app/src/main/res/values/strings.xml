@@ -24,6 +24,9 @@
     <string name="hm_style_grid">Grid View</string>
     <string name="hm_hist_del">Removed from History</string>
     <string name="hm_cache_del">Cache Cleared</string>
+    <string name="hm_cookie_del">Cookies Cleared</string>
+    <string name="hm_webview_data_del">WebView Data Cleared</string>
+    <string name="hm_webview_data_del_fail">WebView Data Cleanup Partially Failed</string>
 
     // Play Detail Page //
     <string name="det_play">Play</string>
@@ -66,6 +69,11 @@
     <string name="mn_bgplay">Bgplay</string>
     <string name="mn_preview">Preview Window</string>
     <string name="mn_webview">WebView</string>
+    <string name="mn_webview_cookie">Clear Cookie</string>
+    <string name="mn_webview_data">Clear WebView Data</string>
+    <string name="mn_clear_action">Clear</string>
+    <string name="dia_clear_cookie">Clear all WebView cookies? This may log out web-based drives.</string>
+    <string name="dia_clear_webview_data">Clear WebView site data and cache? Cookies will be kept.</string>
     <string name="mn_render">Render</string>
     <string name="mn_backup">Backup/Restore</string>
     <string name="mn_dns">DNS</string>
@@ -133,6 +141,7 @@
     <string name="act_search_rem">Remote</string>
     <string name="act_search_trend">Trending</string>
     <string name="act_search_txt">Enter Search Title</string>
+    <string name="act_folder_index_search">Folder Index Search</string>
     <string name="act_settings">Settings</string>
     <string name="act_home">Home</string>
     <string name="act_player">Player</string>
