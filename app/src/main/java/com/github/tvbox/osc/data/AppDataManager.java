@@ -22,7 +22,7 @@ import java.io.IOException;
  * @since 2020/5/15
  */
 public class AppDataManager {
-    private static final int DB_FILE_VERSION = 4;
+    private static final int DB_FILE_VERSION = 5;
     private static final String DB_NAME = "tvbox";
     private static volatile AppDataManager manager;
     private static AppDataBase dbInstance;
@@ -93,6 +93,26 @@ public class AppDataManager {
         }
     };
 
+    static final Migration MIGRATION_4_5 = new Migration(4, 5) {
+        @Override
+        public void migrate(SupportSQLiteDatabase database) {
+            try {
+                database.execSQL("CREATE TABLE IF NOT EXISTS `ktvMediaSource` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `type` TEXT, `displayName` TEXT, `rootPathOrUrl` TEXT, `configJson` TEXT, `enabled` INTEGER NOT NULL, `scanStatus` TEXT, `scanError` TEXT, `lastScanAt` INTEGER NOT NULL)");
+                database.execSQL("CREATE TABLE IF NOT EXISTS `ktvSong` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sourceId` INTEGER NOT NULL, `sourceType` TEXT, `filePath` TEXT, `playUrl` TEXT, `fileName` TEXT, `title` TEXT, `artist` TEXT, `searchText` TEXT, `initials` TEXT, `lastModified` INTEGER NOT NULL, `fileSize` INTEGER NOT NULL)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvSong_sourceId` ON `ktvSong` (`sourceId`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvSong_fileName` ON `ktvSong` (`fileName`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvSong_title` ON `ktvSong` (`title`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvSong_artist` ON `ktvSong` (`artist`)");
+                database.execSQL("CREATE TABLE IF NOT EXISTS `ktvQueueItem` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `songId` INTEGER NOT NULL, `songTitle` TEXT, `artist` TEXT, `playUrl` TEXT, `sourceType` TEXT, `sourcePath` TEXT, `queueOrder` INTEGER NOT NULL, `status` TEXT, `createdAt` INTEGER NOT NULL)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvQueueItem_songId` ON `ktvQueueItem` (`songId`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvQueueItem_queueOrder` ON `ktvQueueItem` (`queueOrder`)");
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_ktvQueueItem_status` ON `ktvQueueItem` (`status`)");
+            } catch (SQLiteException e) {
+                e.printStackTrace();
+            }
+        }
+    };
+
     static String dbPath() {
         return DB_NAME + ".v" + DB_FILE_VERSION + ".db";
     }
@@ -106,17 +126,23 @@ public class AppDataManager {
         if (latestDb.exists()) {
             return;
         }
-        File legacyDb = App.getInstance().getDatabasePath(dbPath(3));
-        if (!legacyDb.exists()) {
-            return;
-        }
-        if (!latestDb.getParentFile().exists()) {
-            latestDb.getParentFile().mkdirs();
-        }
-        try {
-            FileUtils.copyFile(legacyDb, latestDb);
-        } catch (IOException e) {
-            e.printStackTrace();
+        File[] legacyCandidates = new File[] {
+                App.getInstance().getDatabasePath(dbPath(4)),
+                App.getInstance().getDatabasePath(dbPath(3))
+        };
+        for (File legacyDb : legacyCandidates) {
+            if (!legacyDb.exists()) {
+                continue;
+            }
+            if (!latestDb.getParentFile().exists()) {
+                latestDb.getParentFile().mkdirs();
+            }
+            try {
+                FileUtils.copyFile(legacyDb, latestDb);
+                return;
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -129,10 +155,11 @@ public class AppDataManager {
         if (dbInstance == null)
             dbInstance = Room.databaseBuilder(App.getInstance(), AppDataBase.class, dbPath())
                     .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-                    .addMigrations(MIGRATION_1_2)
-                    .addMigrations(MIGRATION_2_3)
-                    .addMigrations(MIGRATION_3_4)
-                    .addCallback(new RoomDatabase.Callback() {
+                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_3_4)
+                .addMigrations(MIGRATION_4_5)
+                .addCallback(new RoomDatabase.Callback() {
                         @Override
                         public void onCreate(@NonNull SupportSQLiteDatabase db) {
                             super.onCreate(db);

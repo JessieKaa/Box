@@ -50,6 +50,7 @@ import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.ui.adapter.HomePageAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.adapter.SortAdapter;
+import com.github.tvbox.osc.ui.activity.ktv.KtvHomeActivity;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.ui.dialog.TipDialog;
 import com.github.tvbox.osc.ui.fragment.GridFragment;
@@ -100,6 +101,7 @@ public class HomeActivity extends BaseActivity {
     private ImageView tvStyle;
     private ImageView tvDraw;
     private ImageView tvMenu;
+    private TextView tvKtv;
     private TextView tvDate;
     private TvRecyclerView mGridView;
     private NoScrollViewPager mViewPager;
@@ -166,6 +168,7 @@ public class HomeActivity extends BaseActivity {
         this.tvStyle = findViewById(R.id.tvStyle);
         this.tvDraw = findViewById(R.id.tvDrawer);
         this.tvMenu = findViewById(R.id.tvMenu);
+        this.tvKtv = findViewById(R.id.tvKtv);
         this.tvDate = findViewById(R.id.tvDate);
         this.contentLayout = findViewById(R.id.contentLayout);
         this.mGridView = findViewById(R.id.mGridViewCategory);
@@ -351,6 +354,12 @@ public class HomeActivity extends BaseActivity {
             public boolean onLongClick(View view) {
                 startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null)));
                 return true;
+            }
+        });
+        tvKtv.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                jumpActivity(KtvHomeActivity.class);
             }
         });
         // Button : Date >> Go into Android Date Settings --------------
@@ -815,6 +824,7 @@ public class HomeActivity extends BaseActivity {
             tvStyle.setFocusable(false);
             tvDraw.setFocusable(false);
             tvMenu.setFocusable(false);
+            tvKtv.setFocusable(false);
             return;
         }
         // Show Top =======================================================
@@ -834,6 +844,7 @@ public class HomeActivity extends BaseActivity {
             tvStyle.setFocusable(true);
             tvDraw.setFocusable(true);
             tvMenu.setFocusable(true);
+            tvKtv.setFocusable(true);
         }
     }
 

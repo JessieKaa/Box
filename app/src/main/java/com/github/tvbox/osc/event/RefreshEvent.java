@@ -28,6 +28,8 @@ public class RefreshEvent {
     public static final int TYPE_REFRESH_NOTIFY = 17;
     public static final int TYPE_SET_DANMU_SETTINGS = 18;
     public static final int TYPE_HOME_FOLDER_SHORTCUT_REFRESH = 19;
+    public static final int TYPE_KTV_SOURCE_REFRESH = 20;
+    public static final int TYPE_KTV_QUEUE_REFRESH = 21;
     public int type;
     public Object obj;
 

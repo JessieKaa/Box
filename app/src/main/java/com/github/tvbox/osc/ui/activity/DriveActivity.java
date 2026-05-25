@@ -23,7 +23,10 @@ import com.github.tvbox.osc.bean.DriveFolderFile;
 import com.github.tvbox.osc.bean.VodInfo;
 import com.github.tvbox.osc.cache.RoomDataManger;
 import com.github.tvbox.osc.cache.StorageDrive;
+import com.github.tvbox.osc.cache.KtvMediaSource;
 import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.ktv.KtvLibraryIndexManager;
+import com.github.tvbox.osc.ktv.KtvMediaSourceType;
 import com.github.tvbox.osc.ui.adapter.DriveAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.dialog.AlistDriveDialog;
@@ -152,7 +155,7 @@ public class DriveActivity extends BaseActivity {
             public void onClick(View view) {
                 FastClickCheckUtil.check(view);
                 if (shouldShowAddShortcutAction()) {
-                    addCurrentFolderShortcut();
+                    openCurrentDirectoryAddDialog();
                     return;
                 }
                 StorageDriveType.TYPE[] types = StorageDriveType.TYPE.values();
@@ -217,6 +220,7 @@ public class DriveActivity extends BaseActivity {
             public void onItemClick(TvRecyclerView parent, View itemView, int position) {
                 if (delMode) {
                     DriveFolderFile selectedDrive = drives.get(position);
+                    deleteAssociatedKtvSources(selectedDrive);
                     RoomDataManger.deleteDrive(selectedDrive.getDriveData().getId());
                     EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_DRIVE_REFRESH));
                     return;
@@ -516,6 +520,26 @@ public class DriveActivity extends BaseActivity {
         webdavDialog.show();
     }
 
+    private void deleteAssociatedKtvSources(DriveFolderFile drive) {
+        if (drive == null || drive.getDriveData() == null) {
+            return;
+        }
+        if (drive.getDriveType() == StorageDriveType.TYPE.LOCAL) {
+            RoomDataManger.deleteKtvMediaSourcesByRootOrChildren(KtvMediaSourceType.LOCAL.name(), drive.getDriveData().name);
+            return;
+        }
+        if (drive.getDriveType() == StorageDriveType.TYPE.WEBDAV) {
+            String rootUrl = null;
+            try {
+                if (drive.getConfig() != null && drive.getConfig().has("url")) {
+                    rootUrl = drive.getConfig().get("url").getAsString();
+                }
+            } catch (Exception ignored) {
+            }
+            RoomDataManger.deleteKtvMediaSourcesByRootOrChildren(KtvMediaSourceType.WEBDAV.name(), rootUrl);
+        }
+    }
+
     private void openAlistDriveDialog(StorageDrive drive) {
         AlistDriveDialog dialog = new AlistDriveDialog(mContext, drive);
         EventBus.getDefault().register(dialog);
@@ -745,10 +769,16 @@ public class DriveActivity extends BaseActivity {
     }
 
     private boolean shouldShowAddShortcutAction() {
-        return viewModel != null
-                && viewModel.getCurrentDrive() != null
-                && viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.LOCAL
-                && !TextUtils.isEmpty(getCurrentLocalDirectoryPath());
+        if (viewModel == null || viewModel.getCurrentDrive() == null) {
+            return false;
+        }
+        if (viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.LOCAL) {
+            return !TextUtils.isEmpty(getCurrentLocalDirectoryPath());
+        }
+        if (viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.WEBDAV) {
+            return true;
+        }
+        return false;
     }
 
     private String getCurrentLocalDirectoryPath() {
@@ -781,6 +811,143 @@ public class DriveActivity extends BaseActivity {
         }
         RoomDataManger.rebuildShortcutIndex(shortcut.getId());
         Toast.makeText(mContext, "已添加到首页并开始索引", Toast.LENGTH_SHORT).show();
+    }
+
+    private void openCurrentDirectoryAddDialog() {
+        List<String> actions = new ArrayList<>();
+        if (viewModel != null && viewModel.getCurrentDrive() != null
+                && viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.LOCAL) {
+            actions.add("添加到首页");
+        }
+        actions.add("加入 KTV 歌库");
+        SelectDialog<String> dialog = new SelectDialog<>(this);
+        dialog.setTip("选择操作");
+        dialog.setItemCheckDisplay(false);
+        dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<String>() {
+            @Override
+            public void click(String value, int pos) {
+                dialog.dismiss();
+                if ("加入 KTV 歌库".equals(value)) {
+                    addCurrentFolderToKtv();
+                } else {
+                    addCurrentFolderShortcut();
+                }
+            }
+
+            @Override
+            public String getDisplay(String val) {
+                return val;
+            }
+        }, new DiffUtil.ItemCallback<String>() {
+            @Override
+            public boolean areItemsTheSame(@NonNull @NotNull String oldItem, @NonNull @NotNull String newItem) {
+                return oldItem.equals(newItem);
+            }
+
+            @Override
+            public boolean areContentsTheSame(@NonNull @NotNull String oldItem, @NonNull @NotNull String newItem) {
+                return oldItem.equals(newItem);
+            }
+        }, actions, 0);
+        dialog.show();
+    }
+
+    private void addCurrentFolderToKtv() {
+        if (viewModel != null && viewModel.getCurrentDrive() != null
+                && viewModel.getCurrentDrive().getDriveType() == StorageDriveType.TYPE.WEBDAV) {
+            addCurrentWebDavToKtv();
+            return;
+        }
+        String currentPath = getCurrentLocalDirectoryPath();
+        if (TextUtils.isEmpty(currentPath)) {
+            Toast.makeText(mContext, "当前目录不可添加", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        KtvMediaSource source = findExistingKtvSource(KtvMediaSourceType.LOCAL.name(), currentPath);
+        if (source == null) {
+            source = new KtvMediaSource();
+            source.type = KtvMediaSourceType.LOCAL.name();
+            source.displayName = RoomDataManger.buildShortcutName(currentPath, null);
+            source.rootPathOrUrl = RoomDataManger.normalizeKtvSourcePath(KtvMediaSourceType.LOCAL.name(), currentPath);
+            source.enabled = 1;
+            source.scanStatus = "IDLE";
+            long sourceId = RoomDataManger.insertKtvMediaSource(source);
+            source.setId((int) sourceId);
+        }
+        KtvMediaSource finalSource = source;
+        Toast.makeText(mContext, "已加入 KTV，开始扫描", Toast.LENGTH_SHORT).show();
+        KtvLibraryIndexManager.get().scan(finalSource, new KtvLibraryIndexManager.ScanCallback() {
+            @Override
+            public void onSuccess(int count) {
+                mHandler.post(() -> Toast.makeText(mContext, "KTV 扫描完成，共 " + count + " 首", Toast.LENGTH_SHORT).show());
+            }
+
+            @Override
+            public void onError(String error) {
+                mHandler.post(() -> Toast.makeText(mContext, "KTV 扫描失败: " + error, Toast.LENGTH_SHORT).show());
+            }
+        });
+    }
+
+    private void addCurrentWebDavToKtv() {
+        if (viewModel == null || viewModel.getCurrentDrive() == null) {
+            Toast.makeText(mContext, "当前目录不可添加", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        DriveFolderFile currentDrive = viewModel.getCurrentDrive();
+        String relative = "";
+        if (viewModel.getCurrentDriveNote() != null) {
+            relative = viewModel.getCurrentDriveNote().getAccessingPathStr() + viewModel.getCurrentDriveNote().name;
+        }
+        if (relative.startsWith("/")) {
+            relative = relative.substring(1);
+        }
+        String baseUrl = currentDrive.getConfig().get("url").getAsString();
+        String rootUrl = buildWebDavKtvRootUrl(baseUrl, relative);
+        KtvMediaSource source = findExistingKtvSource(KtvMediaSourceType.WEBDAV.name(), rootUrl);
+        if (source == null) {
+            source = new KtvMediaSource();
+            source.type = KtvMediaSourceType.WEBDAV.name();
+            source.displayName = currentDrive.name + (TextUtils.isEmpty(relative) ? "" : (" / " + relative));
+            source.rootPathOrUrl = rootUrl;
+            source.configJson = currentDrive.getDriveData().configJson;
+            source.enabled = 1;
+            source.scanStatus = "IDLE";
+            long sourceId = RoomDataManger.insertKtvMediaSource(source);
+            source.setId((int) sourceId);
+        }
+        KtvMediaSource finalSource = source;
+        Toast.makeText(mContext, "已加入 KTV，开始扫描", Toast.LENGTH_SHORT).show();
+        KtvLibraryIndexManager.get().scan(finalSource, new KtvLibraryIndexManager.ScanCallback() {
+            @Override
+            public void onSuccess(int count) {
+                mHandler.post(() -> Toast.makeText(mContext, "KTV 扫描完成，共 " + count + " 首", Toast.LENGTH_SHORT).show());
+            }
+
+            @Override
+            public void onError(String error) {
+                mHandler.post(() -> Toast.makeText(mContext, "KTV 扫描失败: " + error, Toast.LENGTH_SHORT).show());
+            }
+        });
+    }
+
+    private KtvMediaSource findExistingKtvSource(String type, String rootPathOrUrl) {
+        String normalized = RoomDataManger.normalizeKtvSourcePath(type, rootPathOrUrl);
+        for (KtvMediaSource source : RoomDataManger.getAllKtvMediaSources()) {
+            if (type.equals(source.type) && normalized.equals(RoomDataManger.normalizeKtvSourcePath(source.type, source.rootPathOrUrl))) {
+                return source;
+            }
+        }
+        return null;
+    }
+
+    private String buildWebDavKtvRootUrl(String baseUrl, String relative) {
+        if (TextUtils.isEmpty(baseUrl)) {
+            return "";
+        }
+        String normalizedBase = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+        String normalizedRelative = TextUtils.isEmpty(relative) ? "" : relative;
+        return RoomDataManger.normalizeKtvSourcePath(KtvMediaSourceType.WEBDAV.name(), normalizedBase + normalizedRelative);
     }
 
     @Override

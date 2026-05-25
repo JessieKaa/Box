@@ -86,6 +86,15 @@
             android:name=".ui.activity.DriveActivity"
             android:screenOrientation="sensorLandscape" />
         <activity
+            android:name=".ui.activity.ktv.KtvHomeActivity"
+            android:screenOrientation="sensorLandscape" />
+        <activity
+            android:name=".ui.activity.ktv.KtvSongListActivity"
+            android:screenOrientation="sensorLandscape" />
+        <activity
+            android:name=".ui.activity.ktv.KtvQueueActivity"
+            android:screenOrientation="sensorLandscape" />
+        <activity
             android:name=".ui.activity.FolderIndexSearchActivity"
             android:windowSoftInputMode="stateHidden"
             android:screenOrientation="sensorLandscape" />

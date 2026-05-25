@@ -9,9 +9,13 @@ import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.HistoryHelper;
 import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.bean.VodInfo;
+import com.github.tvbox.osc.cache.KtvMediaSource;
+import com.github.tvbox.osc.cache.KtvQueueItem;
+import com.github.tvbox.osc.cache.KtvSong;
 import com.github.tvbox.osc.data.AppDataManager;
 import com.github.tvbox.osc.data.HomeFolderIndexManager;
 import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.ktv.KtvMediaSourceType;
 import com.github.tvbox.osc.util.StorageDriveType;
 import com.google.gson.ExclusionStrategy;
 import com.google.gson.FieldAttributes;
@@ -26,6 +30,7 @@ import org.greenrobot.eventbus.EventBus;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * @author pj567
@@ -167,6 +172,130 @@ public class RoomDataManger {
         return AppDataManager.get().getVodCollectDao().getAll();
     }
 
+    public static long insertKtvMediaSource(KtvMediaSource source) {
+        return AppDataManager.get().getKtvMediaSourceDao().insert(source);
+    }
+
+    public static List<KtvMediaSource> getAllKtvMediaSources() {
+        return AppDataManager.get().getKtvMediaSourceDao().getAll();
+    }
+
+    public static KtvMediaSource getKtvMediaSource(int id) {
+        return AppDataManager.get().getKtvMediaSourceDao().getById(id);
+    }
+
+    public static List<KtvMediaSource> getKtvMediaSources(String type, String rootPathOrUrl) {
+        return AppDataManager.get().getKtvMediaSourceDao().getByTypeAndRootPathOrUrl(type, rootPathOrUrl);
+    }
+
+    public static List<KtvMediaSource> getKtvMediaSourcesByRootOrChildren(String type, String rootPathOrUrl) {
+        return AppDataManager.get().getKtvMediaSourceDao().getByTypeAndRootPathOrUrlOrChildren(
+                type,
+                rootPathOrUrl,
+                escapeSqlLikeKeyword(rootPathOrUrl) + "/%"
+        );
+    }
+
+    public static void deleteKtvMediaSource(int id) {
+        AppDataManager.get().getKtvMediaSourceDao().deleteById(id);
+        AppDataManager.get().getKtvSongDao().deleteBySourceId(id);
+    }
+
+    public static void deleteKtvMediaSourcesByRootOrChildren(String type, String rootPathOrUrl) {
+        List<KtvMediaSource> sources = getKtvMediaSourcesByRootOrChildren(type, normalizeKtvSourcePath(type, rootPathOrUrl));
+        if (sources == null || sources.isEmpty()) {
+            return;
+        }
+        for (KtvMediaSource source : sources) {
+            deleteKtvMediaSource(source.getId());
+        }
+        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_KTV_SOURCE_REFRESH));
+    }
+
+    public static long insertKtvSong(KtvSong song) {
+        return AppDataManager.get().getKtvSongDao().insert(song);
+    }
+
+    public static long[] insertKtvSongs(List<KtvSong> songs) {
+        return AppDataManager.get().getKtvSongDao().insertAll(songs);
+    }
+
+    public static List<KtvSong> getKtvSongs(int sourceId) {
+        if (sourceId <= 0) {
+            return AppDataManager.get().getKtvSongDao().getAll();
+        }
+        return AppDataManager.get().getKtvSongDao().getBySourceId(sourceId);
+    }
+
+    public static List<KtvSong> searchKtvSongs(int sourceId, String keyword) {
+        String normalized = "%" + escapeSqlLikeKeyword(keyword.trim().toLowerCase(Locale.ROOT)) + "%";
+        if (sourceId > 0) {
+            return AppDataManager.get().getKtvSongDao().searchByKeyword(sourceId, normalized);
+        }
+        return AppDataManager.get().getKtvSongDao().searchAll(normalized);
+    }
+
+    public static KtvSong getKtvSong(int id) {
+        return AppDataManager.get().getKtvSongDao().getById(id);
+    }
+
+    public static void clearKtvSongsBySource(int sourceId) {
+        AppDataManager.get().getKtvSongDao().deleteBySourceId(sourceId);
+    }
+
+    public static long insertKtvQueueItem(KtvQueueItem item) {
+        return AppDataManager.get().getKtvQueueItemDao().insert(item);
+    }
+
+    public static long[] insertKtvQueueItems(List<KtvQueueItem> items) {
+        return AppDataManager.get().getKtvQueueItemDao().insertAll(items);
+    }
+
+    public static List<KtvQueueItem> getAllKtvQueueItems() {
+        return AppDataManager.get().getKtvQueueItemDao().getAll();
+    }
+
+    public static KtvQueueItem getCurrentKtvQueueItem() {
+        return AppDataManager.get().getKtvQueueItemDao().getFirstByStatus(KtvQueueItem.STATUS_PLAYING);
+    }
+
+    public static KtvQueueItem getKtvQueueItem(int id) {
+        return AppDataManager.get().getKtvQueueItemDao().getById(id);
+    }
+
+    public static List<KtvQueueItem> getPendingKtvQueueItems() {
+        return AppDataManager.get().getKtvQueueItemDao().getByStatus(KtvQueueItem.STATUS_PENDING);
+    }
+
+    public static KtvQueueItem getNextPendingKtvQueueItem() {
+        return AppDataManager.get().getKtvQueueItemDao().getFirstByStatus(KtvQueueItem.STATUS_PENDING);
+    }
+
+    public static long getNextKtvQueueOrder() {
+        Long max = AppDataManager.get().getKtvQueueItemDao().getMaxQueueOrder();
+        return max == null ? 0L : max + 1L;
+    }
+
+    public static void markKtvQueueItemStatus(int id, String status) {
+        AppDataManager.get().getKtvQueueItemDao().updateStatus(id, status);
+    }
+
+    public static void markAllPlayingAsDone() {
+        AppDataManager.get().getKtvQueueItemDao().updateStatusByOldStatus(KtvQueueItem.STATUS_PLAYING, KtvQueueItem.STATUS_DONE);
+    }
+
+    public static void clearKtvPendingQueue() {
+        AppDataManager.get().getKtvQueueItemDao().deleteByStatus(KtvQueueItem.STATUS_PENDING);
+    }
+
+    public static void deleteKtvQueueItem(int id) {
+        AppDataManager.get().getKtvQueueItemDao().deleteById(id);
+    }
+
+    public static void clearKtvQueue() {
+        AppDataManager.get().getKtvQueueItemDao().deleteAll();
+    }
+
     public static void insertDriveRecord(@NonNull String name, @NonNull StorageDriveType.TYPE type, JsonObject config) {
         StorageDrive drive = new StorageDrive();
         drive.name = name;
@@ -256,6 +385,96 @@ public class RoomDataManger {
             normalizedPath = normalizedPath.substring(0, normalizedPath.length() - 1);
         }
         return normalizedPath;
+    }
+
+    public static String normalizeKtvSourcePath(String type, String rootPathOrUrl) {
+        if (TextUtils.isEmpty(rootPathOrUrl)) {
+            return "";
+        }
+        if (KtvMediaSourceType.WEBDAV.name().equals(type)) {
+            return normalizeKtvWebDavRootUrl(rootPathOrUrl);
+        }
+        String normalized = normalizeLocalRootPath(rootPathOrUrl);
+        return TextUtils.isEmpty(normalized) ? "" : normalized;
+    }
+
+    public static String normalizeKtvWebDavRootUrl(String rootUrl) {
+        if (TextUtils.isEmpty(rootUrl)) {
+            return "";
+        }
+        String normalized = rootUrl.trim();
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    public static void syncKtvWebDavSourceConfig(String oldRootUrl, String newRootUrl, String displayName, String configJson) {
+        String normalizedOldRootUrl = normalizeKtvSourcePath(KtvMediaSourceType.WEBDAV.name(), oldRootUrl);
+        String normalizedNewRootUrl = normalizeKtvSourcePath(KtvMediaSourceType.WEBDAV.name(), newRootUrl);
+        if (TextUtils.isEmpty(normalizedNewRootUrl)) {
+            return;
+        }
+        String lookupRootUrl = TextUtils.isEmpty(normalizedOldRootUrl) ? normalizedNewRootUrl : normalizedOldRootUrl;
+        List<KtvMediaSource> sources = getKtvMediaSourcesByRootOrChildren(KtvMediaSourceType.WEBDAV.name(), lookupRootUrl);
+        if (sources == null || sources.isEmpty()) {
+            return;
+        }
+        boolean changed = false;
+        for (KtvMediaSource source : sources) {
+            boolean needsUpdate = false;
+            String originalRootPathOrUrl = normalizeKtvSourcePath(source.type, source.rootPathOrUrl);
+            String updatedRootPathOrUrl = originalRootPathOrUrl;
+            if (!TextUtils.isEmpty(normalizedOldRootUrl)
+                    && !TextUtils.isEmpty(originalRootPathOrUrl)
+                    && (originalRootPathOrUrl.equals(normalizedOldRootUrl) || originalRootPathOrUrl.startsWith(normalizedOldRootUrl + "/"))) {
+                String suffix = originalRootPathOrUrl.substring(normalizedOldRootUrl.length());
+                updatedRootPathOrUrl = normalizedNewRootUrl + suffix;
+                source.rootPathOrUrl = updatedRootPathOrUrl;
+                needsUpdate = true;
+            }
+            if (!TextUtils.isEmpty(displayName)
+                    && TextUtils.equals(updatedRootPathOrUrl, normalizedNewRootUrl)
+                    && !TextUtils.equals(displayName, source.displayName)) {
+                source.displayName = displayName;
+                needsUpdate = true;
+            }
+            if (!TextUtils.equals(configJson, source.configJson)) {
+                source.configJson = configJson;
+                needsUpdate = true;
+            }
+            if (needsUpdate) {
+                insertKtvMediaSource(source);
+                changed = true;
+            }
+        }
+        if (changed) {
+            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_KTV_SOURCE_REFRESH));
+        }
+    }
+
+    public static void rescanKtvWebDavSources(String oldRootUrl, String newRootUrl) {
+        String normalizedOldRootUrl = normalizeKtvSourcePath(KtvMediaSourceType.WEBDAV.name(), oldRootUrl);
+        String normalizedNewRootUrl = normalizeKtvSourcePath(KtvMediaSourceType.WEBDAV.name(), newRootUrl);
+        if (TextUtils.isEmpty(normalizedNewRootUrl)) {
+            return;
+        }
+        String lookupRootUrl = TextUtils.isEmpty(normalizedOldRootUrl) ? normalizedNewRootUrl : normalizedOldRootUrl;
+        List<KtvMediaSource> sources = getKtvMediaSourcesByRootOrChildren(KtvMediaSourceType.WEBDAV.name(), lookupRootUrl);
+        if (sources == null || sources.isEmpty()) {
+            return;
+        }
+        for (KtvMediaSource source : sources) {
+            String originalRootPathOrUrl = normalizeKtvSourcePath(source.type, source.rootPathOrUrl);
+            if (TextUtils.isEmpty(originalRootPathOrUrl)) {
+                continue;
+            }
+            if (TextUtils.isEmpty(normalizedOldRootUrl)
+                    || originalRootPathOrUrl.equals(normalizedNewRootUrl)
+                    || originalRootPathOrUrl.startsWith(normalizedNewRootUrl + "/")) {
+                com.github.tvbox.osc.ktv.KtvLibraryIndexManager.get().scan(source, null);
+            }
+        }
     }
 
     public static String buildShortcutName(String rootPath, String preferredName) {

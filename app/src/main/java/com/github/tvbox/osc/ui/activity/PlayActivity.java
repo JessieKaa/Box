@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.util.Base64;
 import android.text.TextUtils;
 import android.util.Rational;
 import android.view.KeyEvent;
@@ -59,7 +60,11 @@ import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.bean.SubtitleBean;
 import com.github.tvbox.osc.bean.VodInfo;
 import com.github.tvbox.osc.cache.CacheManager;
+import com.github.tvbox.osc.cache.KtvQueueItem;
 import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.ktv.KtvIntent;
+import com.github.tvbox.osc.ktv.KtvQueueManager;
+import com.github.tvbox.osc.ktv.WebDavMediaLibraryProvider;
 import com.github.tvbox.osc.player.EXOmPlayer;
 import com.github.tvbox.osc.player.IjkmPlayer;
 import com.github.tvbox.osc.player.MyVideoView;
@@ -153,6 +158,11 @@ public class PlayActivity extends BaseActivity {
     private VodController mController;
     private SourceViewModel sourceViewModel;
     private Handler mHandler;
+    private boolean isKtvMode = false;
+    private int ktvQueueId = -1;
+    private String ktvTitle;
+    private String ktvArtist;
+    private KtvQueueItem currentKtvQueueItem;
 
     private String videoURL;
     private long videoDuration = -1;
@@ -658,6 +668,15 @@ public class PlayActivity extends BaseActivity {
     }
 
     void errorWithRetry(String err, boolean finish) {
+        if (isKtvMode) {
+            runOnUiThread(() -> {
+                if (mVideoView != null) {
+                    mVideoView.release();
+                }
+                playNextKtv(true);
+            });
+            return;
+        }
         if (!autoRetry()) {
             runOnUiThread(new Runnable() {
                 @Override
@@ -813,6 +832,10 @@ public class PlayActivity extends BaseActivity {
     }
 
     void startPlayUrl(String url, HashMap<String, String> headers) {
+        if (isKtvMode && currentKtvQueueItem == null) {
+            setTip("KTV 队列已结束", false, true);
+            return;
+        }
         final String finalUrl = url;
         runOnUiThread(new Runnable() {
             @Override
@@ -827,9 +850,14 @@ public class PlayActivity extends BaseActivity {
                             int playerType = mVodPlayerCfg.getInt("pl");
                             // takagen99: Check for External Player
                             extPlay = false;
-                            if (playerType >= 10) {
-                                VodInfo.VodSeries vs = mVodInfo.seriesMap.get(mVodInfo.playFlag).get(mVodInfo.playIndex);
-                                String playTitle = mVodInfo.name + " : " + vs.name;
+                            if (!isKtvMode && playerType >= 10) {
+                                String playTitle;
+                                if (isKtvMode) {
+                                    playTitle = TextUtils.isEmpty(ktvArtist) ? ktvTitle : (ktvTitle + " : " + ktvArtist);
+                                } else {
+                                    VodInfo.VodSeries vs = mVodInfo.seriesMap.get(mVodInfo.playFlag).get(mVodInfo.playIndex);
+                                    playTitle = mVodInfo.name + " : " + vs.name;
+                                }
                                 setTip("调用外部播放器" + PlayerHelper.getPlayerName(playerType) + "进行播放", true, false);
                                 boolean callResult = false;
                                 switch (playerType) {
@@ -1069,12 +1097,43 @@ public class PlayActivity extends BaseActivity {
         Intent intent = getIntent();
         if (intent != null && intent.getExtras() != null) {
             Bundle bundle = intent.getExtras();
+            isKtvMode = bundle.getBoolean(KtvIntent.EXTRA_KTV_MODE, false);
+            if (isKtvMode) {
+                initKtvData(bundle);
+                return;
+            }
             mVodInfo = (VodInfo) bundle.getSerializable("VodInfo");
             sourceKey = bundle.getString("sourceKey");
             sourceBean = ApiConfig.get().getSource(sourceKey);
             initPlayerCfg();
             play(false);
         }
+    }
+
+    private void initKtvData(Bundle bundle) {
+        ktvQueueId = bundle.getInt(KtvIntent.EXTRA_KTV_QUEUE_ID, -1);
+        ktvTitle = bundle.getString(KtvIntent.EXTRA_KTV_TITLE, "");
+        ktvArtist = bundle.getString(KtvIntent.EXTRA_KTV_ARTIST, "");
+        currentKtvQueueItem = KtvQueueManager.get().restoreOrPromoteCurrent(ktvQueueId);
+        mVodPlayerCfg = new JSONObject();
+        initPlayerDrive();
+        mController.showParse(false);
+        if (currentKtvQueueItem == null) {
+            setTip("KTV 队列已结束", false, true);
+            return;
+        }
+        ktvQueueId = currentKtvQueueItem.getId();
+        ktvTitle = currentKtvQueueItem.songTitle;
+        ktvArtist = currentKtvQueueItem.artist;
+        String url = currentKtvQueueItem.playUrl;
+        mController.setTitle(TextUtils.isEmpty(ktvArtist) ? ktvTitle : (ktvTitle + " - " + ktvArtist));
+        if (TextUtils.isEmpty(url)) {
+            setTip("KTV 队列已结束", false, true);
+            currentKtvQueueItem = null;
+            return;
+        }
+        setTip("正在播放 KTV", true, false);
+        playUrlForKtv(url);
     }
 
     void initPlayerCfg() {
@@ -1152,6 +1211,48 @@ public class PlayActivity extends BaseActivity {
 
         }
         mController.setPlayerConfig(mVodPlayerCfg);
+    }
+
+    private void playUrlForKtv(String url) {
+        if (TextUtils.isEmpty(url)) {
+            errorWithRetry("播放地址为空", false);
+            return;
+        }
+        if (url.startsWith(WebDavMediaLibraryProvider.HEADER_PREFIX)) {
+            try {
+                String decoded = new String(Base64.decode(url.substring(WebDavMediaLibraryProvider.HEADER_PREFIX.length()), Base64.NO_WRAP), java.nio.charset.StandardCharsets.UTF_8);
+                int split = decoded.indexOf('\n');
+                String playUrl = split >= 0 ? decoded.substring(0, split) : decoded;
+                HashMap<String, String> headers = new HashMap<>();
+                if (split >= 0) {
+                    String auth = decoded.substring(split + 1);
+                    if (!TextUtils.isEmpty(auth)) {
+                        headers.put("Authorization", auth);
+                    }
+                }
+                playUrl(playUrl, headers.isEmpty() ? null : headers);
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+        playUrl(url, null);
+    }
+
+    private void playNextKtv(boolean failed) {
+        KtvQueueItem next = failed ? KtvQueueManager.get().onPlaybackFailed() : KtvQueueManager.get().onPlaybackCompleted();
+        if (next == null) {
+            currentKtvQueueItem = null;
+            ktvQueueId = -1;
+            setTip("KTV 队列已结束", false, true);
+            return;
+        }
+        currentKtvQueueItem = next;
+        ktvQueueId = next.getId();
+        ktvTitle = next.songTitle;
+        ktvArtist = next.artist;
+        mController.setTitle(TextUtils.isEmpty(ktvArtist) ? ktvTitle : (ktvTitle + " - " + ktvArtist));
+        mVideoView.setPlayFromZeroPositionOnce(true);
+        playUrlForKtv(next.playUrl);
     }
 
     // takagen99 : Add check for external players not enter PIP    
@@ -1312,6 +1413,10 @@ public class PlayActivity extends BaseActivity {
     private SourceBean sourceBean;
 
     public void playNext(boolean inProgress) {
+        if (isKtvMode) {
+            playNextKtv(false);
+            return;
+        }
         boolean hasNext = true;
         if (mVodInfo == null || mVodInfo.seriesMap.get(mVodInfo.playFlag) == null) {
             hasNext = false;
@@ -1336,6 +1441,9 @@ public class PlayActivity extends BaseActivity {
     }
 
     public void playPrevious() {
+        if (isKtvMode) {
+            return;
+        }
         boolean hasPre = true;
         if (mVodInfo == null || mVodInfo.seriesMap.get(mVodInfo.playFlag) == null) {
             hasPre = false;
@@ -1402,6 +1510,12 @@ public class PlayActivity extends BaseActivity {
     }
 
     public void play(boolean reset) {
+        if (isKtvMode) {
+            if (currentKtvQueueItem != null) {
+                playUrlForKtv(currentKtvQueueItem.playUrl);
+            }
+            return;
+        }
         VodInfo.VodSeries vs = mVodInfo.seriesMap.get(mVodInfo.playFlag).get(mVodInfo.getplayIndex());
         EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH, mVodInfo.getplayIndex()));
         EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH_NOTIFY, mVodInfo.name + "&&" + vs.name));

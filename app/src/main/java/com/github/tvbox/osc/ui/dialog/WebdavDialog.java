@@ -13,6 +13,7 @@ import com.github.tvbox.osc.cache.RoomDataManger;
 import com.github.tvbox.osc.cache.StorageDrive;
 import com.github.tvbox.osc.event.InputMsgEvent;
 import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.ktv.KtvMediaSourceType;
 import com.github.tvbox.osc.util.StorageDriveType;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -88,9 +89,24 @@ public class WebdavDialog extends BaseDialog {
                 config.addProperty("username", username);
                 config.addProperty("password", password);
                 if(drive != null) {
+                    String oldUrl = null;
+                    try {
+                        JsonObject oldConfig = JsonParser.parseString(drive.configJson).getAsJsonObject();
+                        if (oldConfig.has("url")) {
+                            oldUrl = oldConfig.get("url").getAsString();
+                        }
+                    } catch (Exception ignored) {
+                    }
                     drive.name = name;
                     drive.configJson = config.toString();
                     RoomDataManger.updateDriveRecord(drive);
+                    RoomDataManger.syncKtvWebDavSourceConfig(
+                            oldUrl,
+                            url,
+                            name,
+                            config.toString()
+                    );
+                    RoomDataManger.rescanKtvWebDavSources(url, url);
                 } else {
                     RoomDataManger.insertDriveRecord(name, StorageDriveType.TYPE.WEBDAV, config);
                 }
