@@ -1,7 +1,9 @@
 package com.github.tvbox.osc.ui.fragment;
 
+import android.content.ComponentName;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
@@ -88,6 +90,8 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private TextView tvSearchView;
     private TextView tvDns;
     private TextView tvFastSearchText;
+    private TextView tvBootStartup;
+    private TextView tvLauncherMode;
 
     public static ModelSettingFragment newInstance() {
         return new ModelSettingFragment().setArguments();
@@ -143,6 +147,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
         tvDns.setText(OkGoHelper.dnsHttpsList.get(Hawk.get(HawkConfig.DOH_URL, 0)));
         tvHomeDefaultShow = findViewById(R.id.tvHomeDefaultShow);
         tvHomeDefaultShow.setText(Hawk.get(HawkConfig.HOME_DEFAULT_SHOW, false) ? "开启" : "关闭");
+        tvBootStartup = findViewById(R.id.tvBootStartup);
+        tvBootStartup.setText(Hawk.get(HawkConfig.BOOT_STARTUP, false) ? "开启" : "关闭");
+        tvLauncherMode = findViewById(R.id.tvLauncherMode);
+        tvLauncherMode.setText(Hawk.get(HawkConfig.LAUNCHER_MODE, false) ? "开启" : "关闭");
 
         //takagen99 : Set HomeApi as default
         findViewById(R.id.llHomeApi).requestFocus();
@@ -837,6 +845,30 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 FastClickCheckUtil.check(v);
                 AboutDialog dialog = new AboutDialog(mActivity);
                 dialog.show();
+            }
+        });
+
+        findViewById(R.id.llBootStartup).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FastClickCheckUtil.check(v);
+                Hawk.put(HawkConfig.BOOT_STARTUP, !Hawk.get(HawkConfig.BOOT_STARTUP, false));
+                tvBootStartup.setText(Hawk.get(HawkConfig.BOOT_STARTUP, false) ? "开启" : "关闭");
+            }
+        });
+
+        findViewById(R.id.llLauncherMode).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FastClickCheckUtil.check(v);
+                boolean enabled = !Hawk.get(HawkConfig.LAUNCHER_MODE, false);
+                Hawk.put(HawkConfig.LAUNCHER_MODE, enabled);
+                tvLauncherMode.setText(enabled ? "开启" : "关闭");
+                PackageManager pm = mActivity.getPackageManager();
+                ComponentName alias = new ComponentName(mActivity, "com.github.tvbox.osc.ui.activity.HomeActivityLauncher");
+                pm.setComponentEnabledSetting(alias,
+                        enabled ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        PackageManager.DONT_KILL_APP);
             }
         });
 
