@@ -68,6 +68,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Collections;
 
 import me.jessyan.autosize.utils.AutoSizeUtils;
 
@@ -256,11 +257,11 @@ public class DriveActivity extends BaseActivity {
                     if (StorageDriveType.isVideoType(selectedItem.fileType)) {
                         DriveFolderFile currentDrive = viewModel.getCurrentDrive();
                         if (currentDrive.getDriveType() == StorageDriveType.TYPE.LOCAL)
-                            playFile(currentDrive.name + selectedItem.getAccessingPathStr() + selectedItem.name);
+                            playFileList(selectedItem, currentDrive.name + selectedItem.getAccessingPathStr() + selectedItem.name);
                         else if (currentDrive.getDriveType() == StorageDriveType.TYPE.WEBDAV) {
                             JsonObject config = currentDrive.getConfig();
                             String targetPath = selectedItem.getAccessingPathStr() + selectedItem.name;
-                            playFile(config.get("url").getAsString() + targetPath);
+                            playFileList(selectedItem, config.get("url").getAsString() + targetPath);
                         } else if (currentDrive.getDriveType() == StorageDriveType.TYPE.ALISTWEB) {
                             AlistDriveViewModel boxedViewModel = (AlistDriveViewModel) viewModel;
 
@@ -270,7 +271,7 @@ public class DriveActivity extends BaseActivity {
                                     mHandler.post(new Runnable() {
                                         @Override
                                         public void run() {
-                                            playFile(fileUrl);
+                                            playFileList(selectedItem, fileUrl);
                                         }
                                     });
                                 }
@@ -312,6 +313,73 @@ public class DriveActivity extends BaseActivity {
             }
         }
         DrivePlayHelper.playFile(this, "存储", fileUrl);
+    }
+
+    private static final int MAX_PLAYLIST_SIZE = 500;
+
+    private void playFileList(DriveFolderFile clickedItem, String clickedFileUrl) {
+        DriveFolderFile currentDrive = viewModel.getCurrentDrive();
+        DriveFolderFile currentNote = viewModel.getCurrentDriveNote();
+
+        if (currentNote == null || currentNote.getChildren() == null) {
+            playFile(clickedFileUrl);
+            return;
+        }
+
+        List<DriveFolderFile> children = new ArrayList<>(currentNote.getChildren());
+        List<DriveFolderFile> videoFiles = new ArrayList<>();
+        for (DriveFolderFile file : children) {
+            if (file.name != null && file.isFile && StorageDriveType.isVideoType(file.fileType)) {
+                videoFiles.add(file);
+            }
+        }
+
+        if (videoFiles.isEmpty()) {
+            playFile(clickedFileUrl);
+            return;
+        }
+
+        if (videoFiles.size() > MAX_PLAYLIST_SIZE) {
+            videoFiles = new ArrayList<>(videoFiles.subList(0, MAX_PLAYLIST_SIZE));
+        }
+
+        List<String> fileNames = new ArrayList<>();
+        List<String> fileUrls = new ArrayList<>();
+        for (DriveFolderFile file : videoFiles) {
+            fileNames.add(file.name);
+            if (currentDrive.getDriveType() == StorageDriveType.TYPE.LOCAL) {
+                fileUrls.add(currentDrive.name + file.getAccessingPathStr() + file.name);
+            } else if (currentDrive.getDriveType() == StorageDriveType.TYPE.WEBDAV) {
+                JsonObject config = currentDrive.getConfig();
+                fileUrls.add(config.get("url").getAsString() + file.getAccessingPathStr() + file.name);
+            } else if (currentDrive.getDriveType() == StorageDriveType.TYPE.ALISTWEB) {
+                try {
+                    fileUrls.add(AlistDriveViewModel.resolveFileUrl(currentDrive, file));
+                } catch (Exception e) {
+                    fileUrls.add("");
+                }
+            }
+        }
+
+        int startIndex = videoFiles.indexOf(clickedItem);
+        if (startIndex < 0) startIndex = 0;
+
+        String dirName = currentNote.name != null ? currentNote.name : "存储";
+        String playerConfig = null;
+        if (currentDrive.getDriveType() == StorageDriveType.TYPE.WEBDAV) {
+            String credentialStr = currentDrive.getWebDAVBase64Credential();
+            if (credentialStr != null) {
+                JsonObject playerConfigObj = new JsonObject();
+                JsonArray headers = new JsonArray();
+                JsonElement authorization = JsonParser.parseString(
+                        "{ \"name\": \"authorization\", \"value\": \"Basic " + credentialStr + "\" }");
+                headers.add(authorization);
+                playerConfigObj.add("headers", headers);
+                playerConfig = playerConfigObj.toString();
+            }
+        }
+
+        DrivePlayHelper.playFileList(this, dirName, fileNames, fileUrls, startIndex, playerConfig);
     }
 
     private void openSortDialog() {

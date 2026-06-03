@@ -38,7 +38,7 @@ public class AlistDriveViewModel extends AbstractDriveViewModel {
         request.headers("content-type", "application/json;charset=UTF-8");
     }
 
-    public final String getUrl(String str) {
+    public static String getUrl(String str) {
         String str2;
         if (str != null) {
             try {
@@ -211,23 +211,29 @@ public class AlistDriveViewModel extends AbstractDriveViewModel {
         return targetPath;
     }
 
-    public void loadFile(DriveFolderFile targetFile, LoadFileCallback callback) {
-        JsonObject config = currentDrive.getConfig();
+    public static String resolveFileUrl(DriveFolderFile drive, DriveFolderFile file) {
+        JsonObject config = drive.getConfig();
         String webLink = getUrl(config.get("url").getAsString());
-        String targetPath = targetFile.getAccessingPathStr() + targetFile.name;
+        String targetPath = file.getAccessingPathStr() + file.name;
+        if (file.fileUrl != null && !file.fileUrl.isEmpty()) {
+            return file.fileUrl;
+        }
+        try {
+            return URLDecoder.decode(webLink + "/d" + targetPath, "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            return webLink + "/d" + targetPath;
+        }
+    }
+
+    public void loadFile(DriveFolderFile targetFile, LoadFileCallback callback) {
         try {
             if (callback != null) {
-                if (targetFile.fileUrl != null && !targetFile.fileUrl.isEmpty()) {
-                    callback.callback(targetFile.fileUrl);
-                } else {
-                    callback.callback(URLDecoder.decode(webLink + "/d" + targetPath, "UTF-8"));
-                }
+                callback.callback(resolveFileUrl(currentDrive, targetFile));
             }
-        } catch (UnsupportedEncodingException e) {
+        } catch (Exception e) {
             e.printStackTrace();
             callback.fail(e.getMessage());
         }
-
     }
 
     public interface LoadFileCallback {
