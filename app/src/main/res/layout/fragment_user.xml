@@ -13,6 +13,13 @@
     android:paddingRight="@dimen/vs_40"
     android:paddingBottom="@dimen/vs_20">
 
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:scrollbars="none">
+
     <LinearLayout
         android:id="@+id/tvUserHome"
         android:layout_width="wrap_content"
@@ -253,6 +260,44 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/tvKaraoke"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/vs_100"
+            android:layout_gravity="center"
+            android:layout_margin="@dimen/vs_5"
+            android:background="@drawable/shape_user_home"
+            android:clickable="false"
+            android:focusable="true"
+            android:minWidth="@dimen/vs_150"
+            android:orientation="horizontal"
+            android:padding="@dimen/vs_15">
+
+            <ImageView
+                android:id="@+id/hm_karaoke"
+                android:layout_width="@dimen/vs_40"
+                android:layout_height="match_parent"
+                android:layout_margin="@dimen/vs_3"
+                android:alpha="0.9"
+                app:srcCompat="@drawable/hm_karaoke" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:layout_weight="1"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:fontFamily="sans-serif-black"
+                android:gravity="center"
+                android:padding="@dimen/vs_3"
+                android:text="@string/hm_karaoke"
+                android:textColor="@color/color_FFFFFF_90"
+                android:textSize="@dimen/ts_24"
+                android:textStyle="normal" />
+
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/tvSetting"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/vs_100"
@@ -291,6 +336,8 @@
         </LinearLayout>
 
     </LinearLayout>
+
+    </HorizontalScrollView>
 <!-- 首页多行排版 -->
     <com.owen.tvrecyclerview.widget.TvRecyclerView
         android:id="@+id/tvHotListForGrid"

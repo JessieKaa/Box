@@ -1,0 +1,366 @@
+package com.github.tvbox.osc.karaoke.controller;
+
+import android.content.Context;
+import android.os.Handler;
+import android.view.KeyEvent;
+import android.view.View;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
+import android.widget.TextView;
+
+import androidx.annotation.NonNull;
+
+import com.github.tvbox.osc.R;
+
+import xyz.doikki.videoplayer.controller.BaseVideoController;
+import xyz.doikki.videoplayer.player.VideoView;
+import xyz.doikki.videoplayer.util.PlayerUtils;
+
+public class KaraokeController extends BaseVideoController {
+
+    public interface KaraokeControllerCallback {
+        void onPrevious();
+        void onNext();
+        void onTogglePlayPause();
+        void onSwitchAudioTrack();
+        void onBackToSelect();
+    }
+
+    private LinearLayout llTopBar;
+    private LinearLayout llBottomBar;
+    private TextView tvSongTitle;
+    private TextView tvTrackInfo;
+    private ImageView ivPlayPause;
+    private ProgressBar pbLoading;
+
+    // Seek bar
+    private SeekBar seekBar;
+    private TextView tvCurrentTime;
+    private TextView tvTotalTime;
+
+    // Seek overlay (top-right)
+    private LinearLayout llSeekOverlay;
+    private TextView tvSeekTime;
+    private ImageView ivSeekIcon;
+    private ProgressBar pbSeekProgress;
+
+    // Fast-forward / rewind state
+    private boolean simSlideStart = false;
+    private int simSeekPosition = 0;
+    private long simSlideOffset = 0;
+    private long lastSlideTime = 0;
+    private boolean wasPlayingBeforeSeek = false;
+
+    private KaraokeControllerCallback callback;
+    private final Handler hideHandler = new Handler();
+    private final Handler seekOverlayHandler = new Handler();
+    private static final int AUTO_HIDE_DELAY = 5000;
+    private boolean isPlaying = false;
+
+    private final Runnable autoHideRunnable = new Runnable() {
+        @Override
+        public void run() {
+            hide();
+        }
+    };
+
+    private final Runnable hideSeekOverlayRunnable = new Runnable() {
+        @Override
+        public void run() {
+            llSeekOverlay.setVisibility(GONE);
+        }
+    };
+
+    public KaraokeController(@NonNull Context context) {
+        super(context);
+    }
+
+    @Override
+    protected int getLayoutId() {
+        return R.layout.controller_karaoke;
+    }
+
+    @Override
+    protected void initView() {
+        super.initView();
+        llTopBar = findViewById(R.id.llTopBar);
+        llBottomBar = findViewById(R.id.llBottomBar);
+        tvSongTitle = findViewById(R.id.tvSongTitle);
+        tvTrackInfo = findViewById(R.id.tvTrackInfo);
+        ivPlayPause = findViewById(R.id.ivPlayPause);
+        pbLoading = findViewById(R.id.pbLoading);
+
+        seekBar = findViewById(R.id.seekBar);
+        tvCurrentTime = findViewById(R.id.tvCurrentTime);
+        tvTotalTime = findViewById(R.id.tvTotalTime);
+        llSeekOverlay = findViewById(R.id.llSeekOverlay);
+        tvSeekTime = findViewById(R.id.tvSeekTime);
+        ivSeekIcon = findViewById(R.id.ivSeekIcon);
+        pbSeekProgress = findViewById(R.id.pbSeekProgress);
+
+        findViewById(R.id.ivPrev).setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                resetAutoHide();
+                if (callback != null) callback.onPrevious();
+            }
+        });
+        findViewById(R.id.ivNext).setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                resetAutoHide();
+                if (callback != null) callback.onNext();
+            }
+        });
+        ivPlayPause.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                resetAutoHide();
+                if (callback != null) callback.onTogglePlayPause();
+            }
+        });
+        findViewById(R.id.ivAudioTrack).setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                resetAutoHide();
+                if (callback != null) callback.onSwitchAudioTrack();
+            }
+        });
+        findViewById(R.id.ivBack).setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (callback != null) callback.onBackToSelect();
+            }
+        });
+    }
+
+    @Override
+    protected void setProgress(int duration, int position) {
+        if (simSlideStart) return;
+        tvCurrentTime.setText(PlayerUtils.stringForTime(position));
+        tvTotalTime.setText(PlayerUtils.stringForTime(duration));
+        if (duration > 0) {
+            seekBar.setProgress((int) (position * 1.0 / duration * seekBar.getMax()));
+        }
+    }
+
+    private void resetProgressUI() {
+        tvCurrentTime.setText(PlayerUtils.stringForTime(0));
+        tvTotalTime.setText(PlayerUtils.stringForTime(0));
+        seekBar.setProgress(0);
+    }
+
+    @Override
+    protected void onPlayStateChanged(int playState) {
+        super.onPlayStateChanged(playState);
+        switch (playState) {
+            case VideoView.STATE_IDLE:
+                pbLoading.setVisibility(GONE);
+                stopProgress();
+                cancelSeekState();
+                resetProgressUI();
+                break;
+            case VideoView.STATE_PLAYING:
+                isPlaying = true;
+                ivPlayPause.setImageResource(R.drawable.v_pause);
+                pbLoading.setVisibility(GONE);
+                startProgress();
+                break;
+            case VideoView.STATE_PAUSED:
+                isPlaying = false;
+                ivPlayPause.setImageResource(R.drawable.v_play);
+                pbLoading.setVisibility(GONE);
+                stopProgress();
+                break;
+            case VideoView.STATE_PREPARING:
+            case VideoView.STATE_BUFFERING:
+                pbLoading.setVisibility(VISIBLE);
+                if (playState == VideoView.STATE_PREPARING) {
+                    stopProgress();
+                    cancelSeekState();
+                    resetProgressUI();
+                }
+                break;
+            case VideoView.STATE_PREPARED:
+            case VideoView.STATE_ERROR:
+            case VideoView.STATE_BUFFERED:
+                pbLoading.setVisibility(GONE);
+                break;
+            case VideoView.STATE_PLAYBACK_COMPLETED:
+                pbLoading.setVisibility(GONE);
+                isPlaying = false;
+                ivPlayPause.setImageResource(R.drawable.v_play);
+                stopProgress();
+                cancelSeekState();
+                break;
+        }
+    }
+
+    public void setCallback(KaraokeControllerCallback callback) {
+        this.callback = callback;
+    }
+
+    public void setSongTitle(String title) {
+        tvSongTitle.setText(title);
+    }
+
+    public void setTrackInfo(String info) {
+        tvTrackInfo.setText(info);
+    }
+
+    public void setPlaying(boolean playing) {
+        isPlaying = playing;
+        ivPlayPause.setImageResource(playing ? R.drawable.v_pause : R.drawable.v_play);
+    }
+
+    @Override
+    public void show() {
+        llTopBar.setVisibility(VISIBLE);
+        llBottomBar.setVisibility(VISIBLE);
+        mShowing = true;
+        resetAutoHide();
+    }
+
+    @Override
+    public void hide() {
+        if (mShowing) {
+            llTopBar.setVisibility(GONE);
+            llBottomBar.setVisibility(GONE);
+            mShowing = false;
+            hideHandler.removeCallbacks(autoHideRunnable);
+        }
+        // Commit any in-progress seek so the position isn't silently lost
+        if (simSlideStart) {
+            mControlWrapper.seekTo(simSeekPosition);
+            if (wasPlayingBeforeSeek && !mControlWrapper.isPlaying()) {
+                mControlWrapper.start();
+            }
+            simSlideStart = false;
+            simSeekPosition = 0;
+            simSlideOffset = 0;
+        }
+        hideSeekOverlay();
+        seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
+    }
+
+    private void resetAutoHide() {
+        hideHandler.removeCallbacks(autoHideRunnable);
+        hideHandler.postDelayed(autoHideRunnable, AUTO_HIDE_DELAY);
+    }
+
+    private void cancelSeekState() {
+        if (simSlideStart) {
+            simSlideStart = false;
+            simSeekPosition = 0;
+            simSlideOffset = 0;
+        }
+        hideSeekOverlay();
+        seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
+    }
+
+    // ======================== Fast-forward / Rewind ========================
+
+    public void tvSlideStart(int dir) {
+        int duration = (int) mControlWrapper.getDuration();
+        if (duration <= 0) return;
+
+        long currentTime = System.currentTimeMillis();
+        final int baseSkip = 10000;
+        final float accelerationFactor = 1.5f;
+        final long threshold = 500;
+
+        if (!simSlideStart) {
+            wasPlayingBeforeSeek = mControlWrapper.isPlaying();
+            simSlideStart = true;
+            simSlideOffset = (long) baseSkip * dir;
+        } else {
+            if (currentTime - lastSlideTime <= threshold) {
+                simSlideOffset += (long) (baseSkip * accelerationFactor) * dir;
+            } else {
+                simSlideOffset = (long) baseSkip * dir;
+            }
+        }
+        lastSlideTime = currentTime;
+        int currentPosition = (int) mControlWrapper.getCurrentPosition();
+        int position = (int) (currentPosition + simSlideOffset);
+        if (position > duration) position = duration;
+        if (position < 0) position = 0;
+        updateSeekOverlay(currentPosition, position, duration);
+        simSeekPosition = position;
+    }
+
+    public void tvSlideStop() {
+        if (!simSlideStart) return;
+        mControlWrapper.seekTo(simSeekPosition);
+        if (wasPlayingBeforeSeek && !mControlWrapper.isPlaying()) {
+            mControlWrapper.start();
+        }
+        simSlideStart = false;
+        int pos = simSeekPosition;
+        simSeekPosition = 0;
+        simSlideOffset = 0;
+        hideSeekOverlay();
+        if (!wasPlayingBeforeSeek) {
+            setProgress((int) mControlWrapper.getDuration(), pos);
+        }
+    }
+
+    private void updateSeekOverlay(int curr, int seekTo, int duration) {
+        ivSeekIcon.setImageResource(seekTo > curr ? R.drawable.play_ffwd : R.drawable.play_rewind);
+        tvSeekTime.setText(PlayerUtils.stringForTime(seekTo) + " / " + PlayerUtils.stringForTime(duration));
+        pbSeekProgress.setProgress(duration > 0 ? (int) (seekTo * 100.0 / duration) : 0);
+        llSeekOverlay.setVisibility(VISIBLE);
+        seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
+        seekOverlayHandler.postDelayed(hideSeekOverlayRunnable, 1500);
+        show();
+        resetAutoHide();
+    }
+
+    private void hideSeekOverlay() {
+        llSeekOverlay.setVisibility(GONE);
+    }
+
+    // ======================== Key Handling ========================
+
+    public boolean handleKeyEvent(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+
+        if (event.getAction() == KeyEvent.ACTION_UP) {
+            if ((keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) && simSlideStart) {
+                tvSlideStop();
+                return true;
+            }
+            return false;
+        }
+
+        // ACTION_DOWN
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_SPACE:
+                if (callback != null) callback.onTogglePlayPause();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (callback != null) callback.onPrevious();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (callback != null) callback.onNext();
+                return true;
+            case KeyEvent.KEYCODE_MENU:
+            case KeyEvent.KEYCODE_INFO:
+                if (callback != null) callback.onBackToSelect();
+                return true;
+            case KeyEvent.KEYCODE_A:
+                if (callback != null) callback.onSwitchAudioTrack();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                tvSlideStart(-1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                tvSlideStart(1);
+                return true;
+        }
+        return false;
+    }
+}
