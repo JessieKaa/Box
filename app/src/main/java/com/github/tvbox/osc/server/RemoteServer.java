@@ -81,10 +81,16 @@ public class RemoteServer extends NanoHTTPD {
         getRequestList.add(new RawRequestProcess(this.mContext, "/jquery.js", R.raw.jquery, "application/x-javascript"));
         getRequestList.add(new RawRequestProcess(this.mContext, "/script.js", R.raw.script, "application/x-javascript"));
         getRequestList.add(new RawRequestProcess(this.mContext, "/favicon.ico", R.drawable.app_icon, "image/x-icon"));
+        // Karaoke remote page
+        getRequestList.add(new RawRequestProcess(this.mContext, "/karaoke", R.raw.karaoke_html, NanoHTTPD.MIME_HTML));
+        getRequestList.add(new RawRequestProcess(this.mContext, "/karaoke.js", R.raw.karaoke_js, "application/x-javascript"));
+        getRequestList.add(new KaraokeRequestProcess());
     }
 
     private void addPostRequestProcess() {
         postRequestList.add(new InputRequestProcess(this));
+        // Karaoke API
+        postRequestList.add(new KaraokeRequestProcess());
     }
 
     @Override

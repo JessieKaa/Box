@@ -1,0 +1,286 @@
+(function() {
+    'use strict';
+
+    var currentTab = 'library';
+    var libraryCache = [];
+    var searchTimer = null;
+    var currentSearch = '';
+    var currentArtist = '';
+    var stateTimer = null;
+    var librarySeq = 0;
+    var libraryLoaded = false;
+    var queueSeq = 0;
+    var lastQueueIndex = -1;
+    var lastQueueSize = -1;
+
+    // Init
+    $(document).ready(function() {
+        fetchState();
+        stateTimer = setInterval(fetchState, 2000);
+
+        $('#btnPlayPause').on('click', function() { postApi('togglePlayPause'); });
+        $('#btnNext').on('click', function() { postApi('next'); });
+        $('#btnPrev').on('click', function() { postApi('prev'); });
+        $('#btnTrack').on('click', function() { toggleTrackPanel(); });
+    });
+
+    function fetchState() {
+        $.getJSON('/karaoke/api/state', function(data) {
+            if (!data.active) {
+                $('#inactiveBanner').addClass('show');
+                $('#mainContent').hide();
+                libraryCache = [];
+                libraryLoaded = false;
+                lastQueueIndex = -1;
+                lastQueueSize = -1;
+                return;
+            }
+            $('#inactiveBanner').removeClass('show');
+            $('#mainContent').css('display', 'flex');
+
+            updateNowPlaying(data);
+            $('#queueCount').text(data.queueSize || 0);
+
+            // Reload queue when index or size changes
+            var qi = data.currentIndex != null ? data.currentIndex : -1;
+            var qs = data.queueSize || 0;
+            if (qi !== lastQueueIndex || qs !== lastQueueSize) {
+                lastQueueIndex = qi;
+                lastQueueSize = qs;
+                loadQueue();
+            }
+
+            // Load library once
+            if (!libraryLoaded) {
+                libraryLoaded = true;
+                loadLibrary();
+            }
+        }).fail(function() {});
+    }
+
+    function updateNowPlaying(data) {
+        var $np = $('#nowPlaying');
+        if (!data.currentSong) {
+            $np.hide();
+            return;
+        }
+        $np.show();
+        var song = data.currentSong;
+        $('#npTitle').text(song.title || song.displayName || '');
+        $('#npArtist').text(song.artist || '');
+
+        var pos = data.position || 0;
+        var dur = data.duration || 0;
+        $('#npTimeCurrent').text(formatTime(pos));
+        $('#npTimeTotal').text(formatTime(dur));
+        var pct = dur > 0 ? (pos / dur * 100) : 0;
+        $('#npProgressFill').css('width', pct + '%');
+        $('#npProgressBar').data('duration', dur);
+
+        $('#btnPlayPause').html(data.playing ? '&#10074;&#10074;' : '&#9654;');
+    }
+
+    function loadLibrary(search, artist) {
+        var params = {};
+        if (search) params.search = search;
+        if (artist) params.artist = artist;
+        var seq = ++librarySeq;
+        $.getJSON('/karaoke/api/library', params, function(data) {
+            if (seq !== librarySeq) return;
+            libraryCache = data.songs || [];
+            renderArtists(data.artists || []);
+            renderSongs(libraryCache);
+        });
+    }
+
+    function renderArtists(artists) {
+        var container = $('#artistChips');
+        container.empty();
+        var allChip = $('<div class="chip' + (currentArtist === '' ? ' active' : '') + '">').text('全部');
+        allChip.on('click', function() {
+            currentArtist = '';
+            loadLibrary(currentSearch, '');
+        });
+        container.append(allChip);
+        for (var i = 0; i < artists.length; i++) {
+            var name = artists[i];
+            var chip = $('<div class="chip' + (currentArtist === name ? ' active' : '') + '">').text(name);
+            chip.on('click', (function(n) {
+                return function() {
+                    currentArtist = n;
+                    loadLibrary(currentSearch, n);
+                };
+            })(name));
+            container.append(chip);
+        }
+    }
+
+    function renderSongs(songs) {
+        var container = $('#songList');
+        container.empty();
+        if (songs.length === 0) {
+            container.append('<div class="empty-hint"><div class="empty-icon">&#127925;</div>没有找到歌曲</div>');
+            return;
+        }
+        for (var i = 0; i < songs.length; i++) {
+            var song = songs[i];
+            var item = $('<div class="song-item">');
+            item.append('<div class="index">' + (i + 1) + '</div>');
+            item.append('<div class="info"><div class="title">' + escapeHtml(song.displayName || song.title || '') +
+                '</div><div class="artist">' + escapeHtml(song.artist || '') + '</div></div>');
+            var btn = $('<button class="add-btn">点歌</button>');
+            btn.on('click', (function(fp) {
+                return function(e) {
+                    e.stopPropagation();
+                    addToQueue(fp);
+                };
+            })(song.filePath));
+            item.append(btn);
+            container.append(item);
+        }
+    }
+
+    function loadQueue() {
+        var seq = ++queueSeq;
+        $.getJSON('/karaoke/api/queue', function(data) {
+            if (seq !== queueSeq) return;
+            renderQueue(data.queue || [], data.currentIndex);
+        });
+    }
+
+    function renderQueue(queue, currentIndex) {
+        var container = $('#queueList');
+        container.empty();
+        if (queue.length === 0) {
+            container.append('<div class="empty-hint"><div class="empty-icon">&#127926;</div>还没有点歌<br>去曲库选歌吧</div>');
+            return;
+        }
+        for (var i = 0; i < queue.length; i++) {
+            var song = queue[i];
+            var isPlaying = (i === currentIndex);
+            var item = $('<div class="queue-item' + (isPlaying ? ' playing' : '') + '">');
+            item.append('<div class="index">' + (i + 1) + '</div>');
+            item.append('<div class="info"><div class="title">' + escapeHtml(song.displayName || song.title || '') +
+                '</div><div class="artist">' + escapeHtml(song.artist || '') + '</div></div>');
+            var removeBtn = $('<button class="remove-btn" title="移除">&#10005;</button>');
+            removeBtn.on('click', (function(pos) {
+                return function(e) {
+                    e.stopPropagation();
+                    removeFromQueue(pos);
+                };
+            })(i));
+            item.append(removeBtn);
+            item.on('click', (function(pos) {
+                return function() { playAt(pos); };
+            })(i));
+            container.append(item);
+        }
+    }
+
+    function addToQueue(filePath) {
+        $.post('/karaoke/api/addToQueue', { filePath: filePath }, function(data) {
+            loadQueue();
+            fetchState();
+        }, 'json');
+    }
+
+    function removeFromQueue(position) {
+        $.post('/karaoke/api/removeFromQueue', { position: position }, function(data) {
+            if (data.success) {
+                loadQueue();
+                fetchState();
+            }
+        }, 'json');
+    }
+
+    function playAt(position) {
+        $.post('/karaoke/api/playAt', { position: position }, function(data) {
+            if (data.success) {
+                loadQueue();
+                fetchState();
+            }
+        }, 'json');
+    }
+
+    function postApi(action) {
+        $.post('/karaoke/api/' + action, function(data) {
+            setTimeout(fetchState, 300);
+        }, 'json');
+    }
+
+    window.switchTab = function(tab) {
+        currentTab = tab;
+        if (tab === 'library') {
+            $('#tabLibrary').addClass('active');
+            $('#tabQueue').removeClass('active');
+            $('#panelLibrary').show();
+            $('#panelQueue').hide();
+        } else {
+            $('#tabQueue').addClass('active');
+            $('#tabLibrary').removeClass('active');
+            $('#panelQueue').show();
+            $('#panelLibrary').hide();
+            loadQueue();
+        }
+    };
+
+    window.onSearchInput = function() {
+        var val = $('#searchInput').val().trim();
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(function() {
+            currentSearch = val;
+            loadLibrary(currentSearch, currentArtist);
+        }, 300);
+    };
+
+    function formatTime(ms) {
+        if (!ms || ms <= 0) return '0:00';
+        var sec = Math.floor(ms / 1000);
+        var m = Math.floor(sec / 60);
+        var s = sec % 60;
+        return m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Track panel
+    window.toggleTrackPanel = function() {
+        var $panel = $('#trackPanel');
+        if ($panel.hasClass('show')) {
+            $panel.removeClass('show');
+            return;
+        }
+        loadAudioTracks(function(tracks) {
+            if (tracks.length === 0) return;
+            var $list = $('#trackList').empty();
+            for (var i = 0; i < tracks.length; i++) {
+                var t = tracks[i];
+                var cls = 'track-item' + (t.selected ? ' selected' : '');
+                var $item = $('<div class="' + cls + '">');
+                $item.append('<span class="track-name">' + escapeHtml(t.name || ('音轨 ' + (i + 1))) + '</span>');
+                $item.append('<span class="track-check">&#10003;</span>');
+                $item.on('click', (function(trackId) {
+                    return function() {
+                        $.post('/karaoke/api/switchAudioTrack', { trackId: trackId }, function(data) {
+                            if (data.success) {
+                                $panel.removeClass('show');
+                                setTimeout(fetchState, 500);
+                            }
+                        }, 'json');
+                    };
+                })(t.trackId));
+                $list.append($item);
+            }
+            $panel.addClass('show');
+        });
+    };
+
+    function loadAudioTracks(callback) {
+        $.getJSON('/karaoke/api/audioTracks', function(data) {
+            callback(data.tracks || []);
+        }).fail(function() { callback([]); });
+    }
+})();

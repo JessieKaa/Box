@@ -274,6 +274,11 @@ function showPanel(id) {
 
 $(function () {
     $('.weui-tabbar__item').on('click', function () {
+        let href = $(this).attr('data-href');
+        if (href) {
+            window.location.href = href;
+            return;
+        }
         showPanel(parseInt($(this).attr('id').substr(3)));
     });
 });

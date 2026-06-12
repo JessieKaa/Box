@@ -1,6 +1,7 @@
 package com.github.tvbox.osc.karaoke;
 
 import android.Manifest;
+import android.graphics.Bitmap;
 import android.content.Context;
 import android.os.Build;
 import android.os.Bundle;
@@ -33,11 +34,13 @@ import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 import com.github.tvbox.osc.karaoke.controller.KaraokeController;
 import com.github.tvbox.osc.karaoke.playlist.KaraokeSession;
 import com.github.tvbox.osc.karaoke.util.KaraokeFileScanner;
+import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.player.IjkmPlayer;
 import com.github.tvbox.osc.player.MyVideoView;
 import com.github.tvbox.osc.player.TrackInfo;
 import com.github.tvbox.osc.player.TrackInfoBean;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
+import com.github.tvbox.osc.ui.tv.QRCodeGen;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.obsez.android.lib.filechooser.ChooserDialog;
 import com.orhanobut.hawk.Hawk;
@@ -47,7 +50,9 @@ import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import xyz.doikki.videoplayer.player.AbstractPlayer;
 import xyz.doikki.videoplayer.player.PlayerFactory;
@@ -79,6 +84,8 @@ public class KaraokeActivity extends BaseActivity {
     private TextView tvStartPlay;
     private ImageView ivPlayPauseBottom;
     private ImageView ivNextBottom;
+    private LinearLayout llQRCode;
+    private ImageView ivQRCode;
 
     // Adapters
     private KaraokeSongGridAdapter songGridAdapter;
@@ -172,6 +179,10 @@ public class KaraokeActivity extends BaseActivity {
         tvStartPlay = findViewById(R.id.tvStartPlay);
         ivPlayPauseBottom = findViewById(R.id.ivPlayPauseBottom);
         ivNextBottom = findViewById(R.id.ivNextBottom);
+        llQRCode = findViewById(R.id.llQRCode);
+        ivQRCode = findViewById(R.id.ivQRCode);
+
+        generateQRCode();
 
         initAdapters();
         initTopBar();
@@ -188,6 +199,8 @@ public class KaraokeActivity extends BaseActivity {
         } else {
             openFolderPicker();
         }
+
+        KaraokeRemoteManager.get().attach(this);
     }
 
     private void initAdapters() {
@@ -370,6 +383,7 @@ public class KaraokeActivity extends BaseActivity {
 
         mVideoView.setVisibility(View.GONE);
         llSelectLayer.setVisibility(View.VISIBLE);
+        llQRCode.setVisibility(View.VISIBLE);
 
         updateNowPlayingText();
         updateStartPlayButton();
@@ -394,6 +408,7 @@ public class KaraokeActivity extends BaseActivity {
                 && lastPlaybackPosition > 0) {
             mVideoView.setVisibility(View.VISIBLE);
             llSelectLayer.setVisibility(View.GONE);
+            llQRCode.setVisibility(View.GONE);
             mVideoView.seekTo(lastPlaybackPosition);
             mVideoView.start();
             mController.setSongTitle(currentPlayingSong.displayName);
@@ -405,6 +420,7 @@ public class KaraokeActivity extends BaseActivity {
             mVideoView.setUrl(song.filePath);
             mVideoView.setVisibility(View.VISIBLE);
             llSelectLayer.setVisibility(View.GONE);
+            llQRCode.setVisibility(View.GONE);
             mVideoView.start();
             mController.setSongTitle(song.displayName);
             mController.setTrackInfo("");
@@ -508,6 +524,14 @@ public class KaraokeActivity extends BaseActivity {
     }
 
     // ======================== UI Helpers ========================
+
+    private void generateQRCode() {
+        String address = ControlManager.get().getAddress(false) + "karaoke";
+        Bitmap bitmap = QRCodeGen.generateBitmap(address, 240, 240, 1);
+        if (bitmap != null) {
+            ivQRCode.setImageBitmap(bitmap);
+        }
+    }
 
     private void switchTab(boolean toQueue) {
         showingQueue = toQueue;
@@ -807,6 +831,7 @@ public class KaraokeActivity extends BaseActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        KaraokeRemoteManager.get().detach();
         if (mVideoView != null) mVideoView.release();
         if (session != null) session.reset();
     }
@@ -821,6 +846,179 @@ public class KaraokeActivity extends BaseActivity {
                 Toast.makeText(mContext, getString(R.string.karaoke_no_perm), Toast.LENGTH_LONG).show();
                 finish();
             }
+        }
+    }
+
+    // ======================== Remote Control Bridge ========================
+
+    private Map<String, String> songToMap(KaraokeSong song) {
+        Map<String, String> item = new HashMap<>();
+        if (song != null) {
+            item.put("filePath", song.filePath);
+            item.put("title", song.title);
+            item.put("artist", song.artist);
+            item.put("displayName", song.displayName);
+        }
+        return item;
+    }
+
+    Map<String, Object> getRemoteState() {
+        Map<String, Object> state = new HashMap<>();
+        state.put("active", true);
+        state.put("mode", currentMode.name());
+        state.put("playing", mVideoView != null && mVideoView.isPlaying());
+        state.put("currentSong", currentPlayingSong != null ? songToMap(currentPlayingSong) : null);
+        state.put("position", mVideoView != null ? mVideoView.getCurrentPosition() : 0);
+        state.put("duration", mVideoView != null ? mVideoView.getDuration() : 0);
+        state.put("queueSize", session != null ? session.getQueueSize() : 0);
+        state.put("currentIndex", session != null ? session.getCurrentQueueIndex() : -1);
+        return state;
+    }
+
+    KaraokeRemoteManager.LibrarySnapshot getRemoteLibrary(String search, String artist) {
+        if (session == null) return new KaraokeRemoteManager.LibrarySnapshot(new ArrayList<>(), new ArrayList<>());
+        List<KaraokeSong> library = session.getLibrary();
+        List<String> artists = session.getArtists();
+
+        List<Map<String, String>> songs = new ArrayList<>();
+        for (KaraokeSong song : library) {
+            if (artist != null && !artist.isEmpty() && !artist.equals(song.artist)) continue;
+            if (search != null && !search.isEmpty()) {
+                String q = search.toLowerCase();
+                boolean matchTitle = song.title != null && song.title.toLowerCase().contains(q);
+                boolean matchArtist = song.artist != null && song.artist.toLowerCase().contains(q);
+                if (!matchTitle && !matchArtist) continue;
+            }
+            songs.add(songToMap(song));
+        }
+        return new KaraokeRemoteManager.LibrarySnapshot(songs, new ArrayList<>(artists));
+    }
+
+    KaraokeRemoteManager.QueueSnapshot getRemoteQueue() {
+        if (session == null) return new KaraokeRemoteManager.QueueSnapshot(new ArrayList<>(), -1);
+        List<KaraokeSong> queue = new ArrayList<>(session.getQueue());
+        List<Map<String, String>> queueList = new ArrayList<>();
+        for (KaraokeSong song : queue) {
+            queueList.add(songToMap(song));
+        }
+        return new KaraokeRemoteManager.QueueSnapshot(queueList, session.getCurrentQueueIndex());
+    }
+
+    void remoteTogglePlayPause() {
+        if (currentMode == Mode.SELECT && currentPlayingSong != null) {
+            enterPlayMode(currentPlayingSong);
+            return;
+        }
+        togglePlayPause();
+    }
+
+    void remotePlayNext() {
+        if (currentMode == Mode.SELECT) {
+            playNextFromSelect();
+        } else {
+            playNext();
+        }
+    }
+
+    void remotePlayPrevious() {
+        if (currentMode == Mode.SELECT && currentPlayingSong != null) {
+            KaraokeSong prev = session.playPrevious();
+            if (prev != null) {
+                playSong(prev);
+                enterPlayMode(prev);
+            }
+        } else {
+            playPrevious();
+        }
+    }
+
+    void remoteResumePlay() {
+        if (currentPlayingSong == null) return;
+        if (currentMode == Mode.SELECT) {
+            enterPlayMode(currentPlayingSong);
+        } else if (mVideoView != null && !mVideoView.isPlaying()) {
+            mVideoView.start();
+            userPaused = false;
+        }
+    }
+
+    void remotePausePlay() {
+        if (mVideoView != null && mVideoView.isPlaying()) {
+            mVideoView.pause();
+            userPaused = true;
+        }
+    }
+
+    void remoteAddToQueue(String filePath) {
+        if (session == null || session.getLibrary() == null) return;
+        for (KaraokeSong song : session.getLibrary()) {
+            if (filePath.equals(song.filePath)) {
+                if (!session.isInQueue(song)) {
+                    session.addToQueue(song);
+                    updateQueueTabCount();
+                    updateStartPlayButton();
+                    if (showingQueue) {
+                        queueAdapter.setNewData(session.getQueue());
+                        queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+                    } else {
+                        songGridAdapter.updateQueuedSet(session.getQueue());
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    void remoteRemoveFromQueue(int position) {
+        onRemoveFromQueue(position);
+    }
+
+    void remotePlayAt(int position) {
+        if (session == null) return;
+        session.playAt(position);
+        KaraokeSong song = session.getCurrentSong();
+        if (song != null) {
+            playSong(song);
+            enterPlayMode(song);
+        }
+    }
+
+    List<Map<String, Object>> getRemoteAudioTracks() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (mVideoView == null) return result;
+        AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
+        if (!(mediaPlayer instanceof IjkmPlayer)) return result;
+        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
+        TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+        if (trackInfo == null) return result;
+        for (TrackInfoBean bean : trackInfo.getAudio()) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("trackId", bean.trackId);
+            item.put("name", bean.name);
+            item.put("selected", bean.selected);
+            result.add(item);
+        }
+        return result;
+    }
+
+    boolean remoteSwitchAudioTrack(int trackId) {
+        if (mVideoView == null || isFinishing()) return false;
+        AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
+        if (!(mediaPlayer instanceof IjkmPlayer)) return false;
+        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
+        try {
+            ijkPlayer.pause();
+            long progress = ijkPlayer.getCurrentPosition();
+            ijkPlayer.setTrack(trackId);
+            new Handler().postDelayed(() -> {
+                if (!isFinishing() && !isDestroyed()) {
+                    ijkPlayer.seekTo(progress);
+                    ijkPlayer.start();
+                }
+            }, 800);
+            return true;
+        } catch (Exception e) {
+            return false;
         }
     }
 }
