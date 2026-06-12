@@ -26,7 +26,7 @@
         $('#btnPlayPause').on('click', function() { postApi('togglePlayPause'); });
         $('#btnNext').on('click', function() { postApi('next'); });
         $('#btnPrev').on('click', function() { postApi('prev'); });
-        $('#btnTrack').on('click', function() { toggleTrackPanel(); });
+        $('#btnTrack').on('click', function() { cycleAudioTrack(); });
 
         $('#renameInput').on('keydown', function(e) {
             if (e.key === 'Enter') confirmRename();
@@ -301,37 +301,23 @@
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    // Track panel
-    window.toggleTrackPanel = function() {
-        var $panel = $('#trackPanel');
-        if ($panel.hasClass('show')) {
-            $panel.removeClass('show');
-            return;
-        }
+    // Track cycling — single click switches to the next audio track
+    function cycleAudioTrack() {
         loadAudioTracks(function(tracks) {
-            if (tracks.length === 0) return;
-            var $list = $('#trackList').empty();
+            if (tracks.length <= 1) return;
+            var currentIdx = -1;
             for (var i = 0; i < tracks.length; i++) {
-                var t = tracks[i];
-                var cls = 'track-item' + (t.selected ? ' selected' : '');
-                var $item = $('<div class="' + cls + '">');
-                $item.append('<span class="track-name">' + escapeHtml(t.name || ('音轨 ' + (i + 1))) + '</span>');
-                $item.append('<span class="track-check">&#10003;</span>');
-                $item.on('click', (function(trackId) {
-                    return function() {
-                        $.post('/karaoke/api/switchAudioTrack', { trackId: trackId }, function(data) {
-                            if (data.success) {
-                                $panel.removeClass('show');
-                                setTimeout(fetchState, 500);
-                            }
-                        }, 'json');
-                    };
-                })(t.trackId));
-                $list.append($item);
+                if (tracks[i].selected) { currentIdx = i; break; }
             }
-            $panel.addClass('show');
+            var nextIdx = (currentIdx + 1) % tracks.length;
+            var nextTrack = tracks[nextIdx];
+            $.post('/karaoke/api/switchAudioTrack', { trackId: nextTrack.trackId }, function(data) {
+                if (data.success) {
+                    setTimeout(fetchState, 300);
+                }
+            }, 'json');
         });
-    };
+    }
 
     function loadAudioTracks(callback) {
         $.getJSON('/karaoke/api/audioTracks', function(data) {
@@ -481,5 +467,114 @@
         }, 'json').fail(function() {
             alert('刷新失败');
         });
+    };
+
+    // Upload MV files
+    var uploadInProgress = false;
+    var currentUploadXhr = null;
+
+    window.triggerUpload = function() {
+        if (uploadInProgress) return;
+        var input = document.getElementById('mvUploader');
+        if (!input) return;
+        input.value = '';
+        input.click();
+    };
+
+    document.addEventListener('change', function(e) {
+        if (e.target && e.target.id === 'mvUploader') {
+            onUploadSelected(e.target.files);
+        }
+    });
+
+    function onUploadSelected(fileList) {
+        if (!fileList || fileList.length === 0) return;
+        if (uploadInProgress) return;
+        uploadInProgress = true;
+
+        var formData = new FormData();
+        for (var i = 0; i < fileList.length; i++) {
+            formData.append('files-' + i, fileList[i], fileList[i].name);
+        }
+
+        // Show modal in uploading state
+        $('#uploadHeader').text('上传中');
+        $('#uploadProgress').empty();
+        $('#uploadHint').text('上传中，请勿关闭页面').show();
+        $('#uploadModal').addClass('show');
+
+        currentUploadXhr = $.ajax({
+            url: '/karaoke/api/upload',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            timeout: 30 * 60 * 1000,
+            success: function(data) {
+                renderUploadResult(data);
+            },
+            error: function(xhr, status) {
+                if (status === 'abort') return;
+                renderUploadResult({ success: false, successCount: 0, skipCount: 0,
+                    results: [], error: '上传失败：' + status });
+            },
+            complete: function() {
+                uploadInProgress = false;
+                currentUploadXhr = null;
+            }
+        });
+    }
+
+    function renderUploadResult(data) {
+        $('#uploadHeader').text('上传完成');
+        var $progress = $('#uploadProgress').empty();
+        if (data.error) {
+            $progress.append('<div class="upload-item"><span class="file-name">' +
+                escapeHtml(data.error) + '</span></div>');
+        }
+        var results = data.results || [];
+        for (var i = 0; i < results.length; i++) {
+            var r = results[i];
+            var statusText = r.success ? '成功' : '失败';
+            var statusCls = r.success ? 'ok' : 'fail';
+            if (!r.success && r.message && r.message.indexOf('跳过') >= 0) {
+                statusText = '跳过';
+                statusCls = 'skip';
+            }
+            var $item = $('<div class="upload-item">');
+            var nameAndMsg = escapeHtml(r.name || '');
+            if (!r.success && r.message) {
+                nameAndMsg += '<br><span style="font-size:12px;color:#888;">' + escapeHtml(r.message) + '</span>';
+            }
+            $item.append('<span class="file-name">' + nameAndMsg + '</span>');
+            $item.append('<span class="file-status ' + statusCls + '">' + statusText + '</span>');
+            $progress.append($item);
+        }
+        if (results.length === 0 && !data.error) {
+            $progress.append('<div class="upload-item"><span class="file-name">未接收到文件</span></div>');
+        }
+        var successCount = data.successCount || 0;
+        var skipCount = data.skipCount || 0;
+        var failCount = results.length - successCount - skipCount;
+        $('#uploadHint').hide();
+        var summary = '成功 ' + successCount + ' · 跳过 ' + skipCount + ' · 失败 ' + failCount;
+        var $summary = $('<div class="upload-summary">').text(summary);
+        $progress.append($summary);
+
+        // Refresh files/library if any upload succeeded
+        if (successCount > 0) {
+            libraryLoaded = false;
+            loadFiles();
+            loadLibrary();
+        }
+    }
+
+    window.closeUploadModal = function() {
+        if (currentUploadXhr) {
+            currentUploadXhr.abort();
+            currentUploadXhr = null;
+        }
+        uploadInProgress = false;
+        $('#uploadModal').removeClass('show');
     };
 })();

@@ -1,6 +1,7 @@
 package com.github.tvbox.osc.server;
 
 import com.github.tvbox.osc.karaoke.KaraokeRemoteManager;
+import com.github.tvbox.osc.util.FileUtils;
 import com.github.tvbox.osc.util.StorageDriveType;
 import com.google.gson.Gson;
 import com.orhanobut.hawk.Hawk;
@@ -19,6 +20,9 @@ import fi.iki.elonen.NanoHTTPD;
 
 public class KaraokeRequestProcess implements RequestProcess {
 
+    private static final long MAX_UPLOAD_SIZE = 2L * 1024 * 1024 * 1024; // 2GB
+    private static final long FREE_SPACE_MARGIN = 10L * 1024 * 1024; // 10MB
+
     private final Gson gson = new Gson();
 
     @Override
@@ -35,7 +39,7 @@ public class KaraokeRequestProcess implements RequestProcess {
         if (session.getMethod() == NanoHTTPD.Method.GET) {
             return handleGet(path, params);
         } else if (session.getMethod() == NanoHTTPD.Method.POST) {
-            return handlePost(path, params);
+            return handlePost(path, params, files);
         }
 
         return errorResponse("Method not allowed");
@@ -58,7 +62,7 @@ public class KaraokeRequestProcess implements RequestProcess {
         }
     }
 
-    private NanoHTTPD.Response handlePost(String path, Map<String, String> params) {
+    private NanoHTTPD.Response handlePost(String path, Map<String, String> params, Map<String, String> files) {
         KaraokeRemoteManager manager = KaraokeRemoteManager.get();
 
         // File management endpoints work regardless of activity state
@@ -69,6 +73,8 @@ public class KaraokeRequestProcess implements RequestProcess {
                 return handleRenameFile(params);
             case "/deleteFile":
                 return handleDeleteFile(params);
+            case "/upload":
+                return handleUpload(params, files);
         }
 
         if (!manager.isActive()) {
@@ -256,7 +262,7 @@ public class KaraokeRequestProcess implements RequestProcess {
         }
         List<File> fileList = new ArrayList<>();
         for (File f : files) {
-            if (f.isFile()) {
+            if (f.isFile() && !f.getName().startsWith(".uploading_")) {
                 fileList.add(f);
             }
         }
@@ -375,6 +381,195 @@ public class KaraokeRequestProcess implements RequestProcess {
             return errorResponse("TV未连接，无法刷新曲库。下次打开卡拉OK时会自动扫描");
         }
         return jsonResult(true);
+    }
+
+    private NanoHTTPD.Response handleUpload(Map<String, String> params, Map<String, String> files) {
+        File folder = getKaraokeFolder();
+        if (folder == null || !folder.exists() || !folder.isDirectory()) {
+            return errorResponse("未设置卡拉OK文件夹");
+        }
+        if (files == null || files.isEmpty()) {
+            return errorResponse("未接收到文件");
+        }
+
+        String folderCanonical;
+        try {
+            folderCanonical = folder.getCanonicalPath();
+        } catch (IOException e) {
+            return errorResponse("无法访问卡拉OK文件夹");
+        }
+
+        List<String> keys = new ArrayList<>();
+        for (String key : files.keySet()) {
+            if (key != null && key.startsWith("files-")) {
+                keys.add(key);
+            }
+        }
+        Collections.sort(keys);
+
+        int successCount = 0;
+        int skipCount = 0;
+        boolean anySuccess = false;
+        List<Map<String, Object>> results = new ArrayList<>();
+
+        for (String key : keys) {
+            String tmpPath = files.get(key);
+            String rawName = params.get(key);
+            File tmpFile = (tmpPath != null) ? new File(tmpPath) : null;
+
+            try {
+                String sanitizedName = sanitizeUploadName(rawName);
+                if (sanitizedName == null) {
+                    String displayFail = (rawName != null && !rawName.isEmpty()) ? rawName : "(未知文件名)";
+                    results.add(makeFileResult(displayFail, false, "文件名不合法"));
+                    continue;
+                }
+
+                if (tmpFile == null || !tmpFile.exists() || !tmpFile.isFile()) {
+                    results.add(makeFileResult(sanitizedName, false, "临时文件不存在"));
+                    continue;
+                }
+
+                long fileSize = tmpFile.length();
+
+                if (fileSize > MAX_UPLOAD_SIZE) {
+                    results.add(makeFileResult(sanitizedName, false, "文件过大（超过 2GB 限制）"));
+                    continue;
+                }
+
+                if (!isVideoFile(sanitizedName)) {
+                    results.add(makeFileResult(sanitizedName, false, "非视频文件，已跳过"));
+                    skipCount++;
+                    continue;
+                }
+
+                long freeSpace = folder.getFreeSpace();
+                if (freeSpace < fileSize + FREE_SPACE_MARGIN) {
+                    results.add(makeFileResult(sanitizedName, false,
+                            "磁盘空间不足（需要 " + formatFileSize(fileSize + FREE_SPACE_MARGIN)
+                                    + "，剩余 " + formatFileSize(freeSpace) + "）"));
+                    continue;
+                }
+
+                File dest = new File(folder, sanitizedName);
+                try {
+                    String destCanonical = dest.getCanonicalPath();
+                    if (!destCanonical.equals(folderCanonical)
+                            && !destCanonical.startsWith(folderCanonical + File.separator)) {
+                        results.add(makeFileResult(sanitizedName, false, "目标路径非法"));
+                        continue;
+                    }
+                } catch (IOException e) {
+                    results.add(makeFileResult(sanitizedName, false, "路径解析失败"));
+                    continue;
+                }
+
+                String displayName = sanitizedName;
+                if (dest.exists()) {
+                    dest = resolveConflict(folder, sanitizedName);
+                    if (dest == null) {
+                        results.add(makeFileResult(sanitizedName, false, "文件名冲突解决失败"));
+                        continue;
+                    }
+                    displayName = dest.getName();
+                }
+
+                File stagingFile = null;
+                try {
+                    stagingFile = File.createTempFile(".uploading_", ".tmp", folder);
+                    FileUtils.copyFile(tmpFile, stagingFile);
+                    if (!stagingFile.renameTo(dest)) {
+                        stagingFile.delete();
+                        results.add(makeFileResult(displayName, false, "重命名失败"));
+                        continue;
+                    }
+                } catch (IOException e) {
+                    if (stagingFile != null) stagingFile.delete();
+                    results.add(makeFileResult(displayName, false, "拷贝失败"));
+                    continue;
+                } catch (Throwable t) {
+                    if (stagingFile != null) stagingFile.delete();
+                    results.add(makeFileResult(displayName, false, "拷贝失败"));
+                    continue;
+                }
+
+                results.add(makeFileResult(displayName, true, "上传成功"));
+                successCount++;
+                anySuccess = true;
+            } finally {
+                if (tmpFile != null && tmpFile.exists()) {
+                    tmpFile.delete();
+                }
+            }
+        }
+
+        if (anySuccess) {
+            KaraokeRemoteManager.get().triggerRescan();
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", anySuccess);
+        result.put("successCount", successCount);
+        result.put("skipCount", skipCount);
+        result.put("results", results);
+        return jsonResponse(gson.toJson(result));
+    }
+
+    private String sanitizeUploadName(String rawName) {
+        if (rawName == null || rawName.isEmpty()) {
+            return null;
+        }
+        if (rawName.indexOf("..") >= 0 || rawName.indexOf('\0') >= 0) {
+            return null;
+        }
+        String name = rawName;
+        int lastSlash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (lastSlash >= 0) {
+            if (lastSlash >= name.length() - 1) {
+                return null;
+            }
+            name = name.substring(lastSlash + 1);
+        }
+        if (name.isEmpty() || name.indexOf("..") >= 0 || name.indexOf('\0') >= 0
+                || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+            return null;
+        }
+        return name;
+    }
+
+    private File resolveConflict(File folder, String name) {
+        int dot = name.lastIndexOf('.');
+        String base;
+        String ext;
+        if (dot > 0 && dot < name.length() - 1) {
+            base = name.substring(0, dot);
+            ext = name.substring(dot);
+        } else {
+            base = name;
+            ext = "";
+        }
+        for (int i = 1; i < 1000; i++) {
+            File candidate = new File(folder, base + " (" + i + ")" + ext);
+            if (!candidate.exists()) return candidate;
+        }
+        return null;
+    }
+
+    private Map<String, Object> makeFileResult(String name, boolean success, String message) {
+        Map<String, Object> r = new HashMap<>();
+        r.put("name", name);
+        r.put("success", success);
+        r.put("message", message);
+        return r;
+    }
+
+    private String formatFileSize(long bytes) {
+        if (bytes < 1024L) return bytes + " B";
+        if (bytes < 1024L * 1024L) return (bytes / 1024L) + " KB";
+        if (bytes < 1024L * 1024L * 1024L) {
+            return String.format(Locale.ROOT, "%.2f MB", bytes / 1024.0 / 1024.0);
+        }
+        return String.format(Locale.ROOT, "%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0);
     }
 
     private NanoHTTPD.Response jsonResponse(String json) {

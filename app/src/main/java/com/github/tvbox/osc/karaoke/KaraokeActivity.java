@@ -67,6 +67,8 @@ public class KaraokeActivity extends BaseActivity {
     private KaraokeSong currentPlayingSong = null;
     private long lastPlaybackPosition = 0;
     private boolean userPaused = false;
+    private int savedAudioTrackIndex = -1;
+    private boolean pendingAudioTrackApply = false;
 
     private MyVideoView mVideoView;
     private KaraokeController mController;
@@ -163,6 +165,12 @@ public class KaraokeActivity extends BaseActivity {
                             playNext();
                         }
                     }, 1500);
+                } else if (playState == VideoView.STATE_PLAYING) {
+                    if (pendingAudioTrackApply && savedAudioTrackIndex > 0) {
+                        if (applySavedAudioTrack()) {
+                            pendingAudioTrackApply = false;
+                        }
+                    }
                 }
             }
         });
@@ -416,6 +424,7 @@ public class KaraokeActivity extends BaseActivity {
             // New song
             currentPlayingSong = song;
             lastPlaybackPosition = 0;
+            pendingAudioTrackApply = true;
             mVideoView.release();
             mVideoView.setUrl(song.filePath);
             mVideoView.setVisibility(View.VISIBLE);
@@ -435,6 +444,7 @@ public class KaraokeActivity extends BaseActivity {
         currentPlayingSong = song;
         lastPlaybackPosition = 0;
         userPaused = false;
+        pendingAudioTrackApply = true;
         mVideoView.release();
         mVideoView.setUrl(song.filePath);
         mVideoView.start();
@@ -743,6 +753,7 @@ public class KaraokeActivity extends BaseActivity {
         dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<TrackInfoBean>() {
             @Override
             public void click(TrackInfoBean value, int pos) {
+                savedAudioTrackIndex = pos;
                 try {
                     for (TrackInfoBean audio : audioTracks) {
                         audio.selected = audio.trackId == value.trackId;
@@ -1043,6 +1054,16 @@ public class KaraokeActivity extends BaseActivity {
         if (!(mediaPlayer instanceof IjkmPlayer)) return false;
         IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
         try {
+            TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+            if (trackInfo != null) {
+                List<TrackInfoBean> audioTracks = trackInfo.getAudio();
+                for (int i = 0; i < audioTracks.size(); i++) {
+                    if (audioTracks.get(i).trackId == trackId) {
+                        savedAudioTrackIndex = i;
+                        break;
+                    }
+                }
+            }
             ijkPlayer.pause();
             long progress = ijkPlayer.getCurrentPosition();
             ijkPlayer.setTrack(trackId);
@@ -1054,6 +1075,28 @@ public class KaraokeActivity extends BaseActivity {
             }, 800);
             return true;
         } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean applySavedAudioTrack() {
+        if (mVideoView == null) return false;
+        AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
+        if (!(mediaPlayer instanceof IjkmPlayer)) return false;
+        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
+        TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+        if (trackInfo == null) return false;
+        List<TrackInfoBean> audioTracks = trackInfo.getAudio();
+        if (audioTracks.isEmpty()) return false;
+        int idx = Math.min(savedAudioTrackIndex, audioTracks.size() - 1);
+        if (idx <= 0) return true;
+        TrackInfoBean target = audioTracks.get(idx);
+        try {
+            ijkPlayer.setTrack(target.trackId);
+            mController.setTrackInfo(target.name);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
             return false;
         }
     }
