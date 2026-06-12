@@ -27,7 +27,7 @@
         .karaoke-header h2 { margin: 0; font-size: 17px; font-weight: 600; color: #fff; }
         .karaoke-header a { color: #888; font-size: 14px; text-decoration: none; }
 
-        /* Inactive */
+        /* Inactive (full-screen, shown before first state fetch only) */
         .inactive-banner { display: none; flex: 1; flex-direction: column;
             align-items: center; justify-content: center; gap: 12px; }
         .inactive-banner.show { display: flex; }
@@ -180,12 +180,89 @@
 
         /* Panels */
         .content-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .panel-library, .panel-queue { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .panel-queue { display: none; }
+        .panel-library, .panel-queue, .panel-files { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .panel-queue, .panel-files { display: none; }
+
+        /* File management */
+        .files-toolbar {
+            padding: 10px 16px; background: #141414; border-bottom: 1px solid #222;
+            flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+        }
+        .files-toolbar .toolbar-title { font-size: 14px; color: #888; }
+        .files-toolbar .toolbar-btn {
+            background: transparent; color: #1aad19; border: 1px solid #1aad19;
+            border-radius: 14px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+        }
+        .files-toolbar .toolbar-btn:active { background: rgba(26,173,25,0.15); }
+        .file-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+        .file-item {
+            display: flex; align-items: center; padding: 12px 16px;
+            border-bottom: 1px solid #1e1e1e;
+        }
+        .file-item.non-video { opacity: 0.55; }
+        .file-item .file-icon { width: 32px; height: 32px; border-radius: 6px;
+            background: #252525; color: #888; display: flex; align-items: center;
+            justify-content: center; font-size: 13px; margin-right: 12px; flex-shrink: 0; }
+        .file-item.non-video .file-icon { background: #1c1c1c; color: #666; }
+        .file-item .info { flex: 1; min-width: 0; }
+        .file-item .info .name { font-size: 15px; color: #fff; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+        .file-item.non-video .info .name { color: #aaa; }
+        .file-item .info .meta { font-size: 12px; color: #777; margin-top: 3px; }
+        .file-item .actions { display: flex; gap: 6px; flex-shrink: 0; }
+        .file-item .action-btn {
+            padding: 6px 12px; border-radius: 12px; font-size: 12px; cursor: pointer;
+            background: transparent; border: 1px solid #333; color: #aaa;
+        }
+        .file-item .action-btn.rename { color: #1aad19; border-color: #1aad19; }
+        .file-item .action-btn.rename:active { background: rgba(26,173,25,0.15); }
+        .file-item .action-btn.delete { color: #c44; border-color: #c44; }
+        .file-item .action-btn.delete:active { background: rgba(204,0,0,0.15); }
+
+        /* Modals */
+        .modal-overlay {
+            display: none; position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7); z-index: 1000; align-items: center;
+            justify-content: center; padding: 20px;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-dialog {
+            background: #1e1e1e; border-radius: 12px; width: 100%; max-width: 360px;
+            overflow: hidden; border: 1px solid #2a2a2a;
+        }
+        .modal-dialog .modal-header { padding: 16px 16px 8px; font-size: 16px;
+            font-weight: 600; color: #fff; }
+        .modal-dialog .modal-body { padding: 8px 16px 16px; font-size: 14px; color: #aaa;
+            line-height: 1.5; }
+        .modal-dialog .modal-body input {
+            width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #2a2a2a;
+            background: #141414; color: #fff; font-size: 15px; box-sizing: border-box;
+            outline: none; margin-top: 8px;
+        }
+        .modal-dialog .modal-body input:focus { border-color: #1aad19; }
+        .modal-dialog .modal-body .hint { font-size: 12px; color: #666; margin-top: 8px; }
+        .modal-dialog .modal-footer { display: flex; border-top: 1px solid #2a2a2a; }
+        .modal-dialog .modal-footer button {
+            flex: 1; padding: 14px 0; background: transparent; border: none;
+            color: #fff; font-size: 15px; cursor: pointer;
+        }
+        .modal-dialog .modal-footer button:active { background: #2a2a2a; }
+        .modal-dialog .modal-footer button.primary { color: #1aad19; font-weight: 500; }
+        .modal-dialog .modal-footer button.danger { color: #c44; }
 
         /* Empty */
         .empty-hint { text-align: center; padding: 60px 20px; color: #555; font-size: 14px; }
         .empty-hint .empty-icon { font-size: 36px; opacity: 0.3; margin-bottom: 12px; }
+
+        /* Offline banner as inline bar (not full-screen) */
+        .offline-bar { display: none; padding: 10px 16px; background: #1c1c1c;
+            border-bottom: 1px solid #2a2a2a; flex-shrink: 0; text-align: center; }
+        .offline-bar.show { display: block; }
+        .offline-bar .text { color: #888; font-size: 13px; }
+        .offline-bar .text strong { color: #1aad19; }
+
+        /* Tab disabled in offline */
+        .tab-bar .tab.disabled { color: #333; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -195,12 +272,19 @@
         <a href="/">&#8592; 返回</a>
     </div>
 
+    <!-- Full-screen loading banner, shown until first state fetch -->
     <div id="inactiveBanner" class="inactive-banner show">
         <div class="icon">&#127908;</div>
         <div class="text">请先在 <strong>TV上打开卡拉OK</strong><br>即可开始遥控点歌</div>
     </div>
 
+    <!-- Main content: always shown after first state fetch -->
     <div id="mainContent" style="display:none; flex:1; flex-direction:column; overflow:hidden;">
+        <!-- Offline bar: shown when TV activity is not connected -->
+        <div id="offlineBar" class="offline-bar">
+            <span class="text">TV未连接，仅文件管理可用。请先在 <strong>TV上打开卡拉OK</strong> 开始点歌</span>
+        </div>
+
         <!-- Now Playing -->
         <div class="now-playing" id="nowPlaying" style="display:none;">
             <div class="song-info">
@@ -232,9 +316,10 @@
         </div>
 
         <!-- Tabs -->
-        <div class="tab-bar">
+        <div class="tab-bar" id="mainTabBar">
             <div class="tab active" id="tabLibrary" onclick="switchTab('library')">曲库</div>
             <div class="tab" id="tabQueue" onclick="switchTab('queue')">已点 <span class="badge" id="queueCount">0</span></div>
+            <div class="tab" id="tabFiles" onclick="switchTab('files')">文件管理</div>
         </div>
 
         <!-- Library Panel -->
@@ -253,8 +338,46 @@
         <div class="panel-queue" id="panelQueue">
             <div class="song-list" id="queueList"></div>
         </div>
+
+        <!-- Files Panel -->
+        <div class="panel-files" id="panelFiles">
+            <div class="files-toolbar">
+                <span class="toolbar-title">卡拉OK文件夹</span>
+                <button class="toolbar-btn" onclick="rescanLibrary()">刷新曲库</button>
+            </div>
+            <div class="file-list" id="fileList"></div>
+        </div>
     </div>
 </div>
+
+<!-- Rename Modal -->
+<div id="renameModal" class="modal-overlay">
+    <div class="modal-dialog">
+        <div class="modal-header">重命名文件</div>
+        <div class="modal-body">
+            <div id="renameFileName" style="color:#fff; margin-bottom:4px;"></div>
+            <input type="text" id="renameInput" placeholder="歌手 - 歌名">
+            <div class="hint">格式：歌手 - 歌名（扩展名会自动保留）</div>
+        </div>
+        <div class="modal-footer">
+            <button onclick="closeRenameModal()">取消</button>
+            <button class="primary" onclick="confirmRename()">确定</button>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Modal -->
+<div id="deleteModal" class="modal-overlay">
+    <div class="modal-dialog">
+        <div class="modal-header">确认删除</div>
+        <div class="modal-body" id="deleteFileName"></div>
+        <div class="modal-footer">
+            <button onclick="closeDeleteModal()">取消</button>
+            <button class="danger" onclick="confirmDelete()">删除</button>
+        </div>
+    </div>
+</div>
+
 <script src="jquery.js"></script>
 <script src="karaoke.js"></script>
 </body>

@@ -167,6 +167,13 @@ public class KaraokeRemoteManager {
         return result != null && result;
     }
 
+    public boolean triggerRescan() {
+        KaraokeActivity activity = getActivity();
+        if (activity == null) return false;
+        activity.runOnUiThread(() -> activity.remoteReloadFolder());
+        return true;
+    }
+
     public static class LibrarySnapshot {
         public final List<Map<String, String>> songs;
         public final List<String> artists;

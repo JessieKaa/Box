@@ -12,6 +12,11 @@
     var queueSeq = 0;
     var lastQueueIndex = -1;
     var lastQueueSize = -1;
+    var fileCache = [];
+    var renameTargetPath = null;
+    var deleteTargetPath = null;
+    var filesLoaded = false;
+    var firstFetch = true;
 
     // Init
     $(document).ready(function() {
@@ -22,40 +27,81 @@
         $('#btnNext').on('click', function() { postApi('next'); });
         $('#btnPrev').on('click', function() { postApi('prev'); });
         $('#btnTrack').on('click', function() { toggleTrackPanel(); });
+
+        $('#renameInput').on('keydown', function(e) {
+            if (e.key === 'Enter') confirmRename();
+        });
     });
 
     function fetchState() {
         $.getJSON('/karaoke/api/state', function(data) {
-            if (!data.active) {
-                $('#inactiveBanner').addClass('show');
-                $('#mainContent').hide();
+            var isActive = data.active;
+
+            // On first successful fetch, switch from full-screen banner to main content
+            if (firstFetch) {
+                firstFetch = false;
+                $('#inactiveBanner').removeClass('show');
+                $('#mainContent').css('display', 'flex');
+            }
+
+            if (!isActive) {
+                $('#offlineBar').addClass('show');
+                $('#nowPlaying').hide();
                 libraryCache = [];
                 libraryLoaded = false;
                 lastQueueIndex = -1;
                 lastQueueSize = -1;
+                // Force files tab when offline (library/queue unavailable)
+                if (currentTab !== 'files') {
+                    switchTab('files');
+                }
+            } else {
+                $('#offlineBar').removeClass('show');
+                $('#mainContent').css('display', 'flex');
+
+                updateNowPlaying(data);
+                $('#queueCount').text(data.queueSize || 0);
+
+                // Reload queue when index or size changes
+                var qi = data.currentIndex != null ? data.currentIndex : -1;
+                var qs = data.queueSize || 0;
+                if (qi !== lastQueueIndex || qs !== lastQueueSize) {
+                    lastQueueIndex = qi;
+                    lastQueueSize = qs;
+                    loadQueue();
+                }
+
+                // Load library once
+                if (!libraryLoaded) {
+                    libraryLoaded = true;
+                    loadLibrary();
+                }
+            }
+
+            updateTabAvailability(isActive);
+            // Load files on first fetch
+            if (!filesLoaded) {
+                filesLoaded = true;
+                loadFiles();
+            }
+        }).fail(function() {
+            if (firstFetch) {
+                // Keep showing full-screen banner until server responds
                 return;
             }
-            $('#inactiveBanner').removeClass('show');
-            $('#mainContent').css('display', 'flex');
+            $('#offlineBar').addClass('show');
+            updateTabAvailability(false);
+        });
+    }
 
-            updateNowPlaying(data);
-            $('#queueCount').text(data.queueSize || 0);
-
-            // Reload queue when index or size changes
-            var qi = data.currentIndex != null ? data.currentIndex : -1;
-            var qs = data.queueSize || 0;
-            if (qi !== lastQueueIndex || qs !== lastQueueSize) {
-                lastQueueIndex = qi;
-                lastQueueSize = qs;
-                loadQueue();
-            }
-
-            // Load library once
-            if (!libraryLoaded) {
-                libraryLoaded = true;
-                loadLibrary();
-            }
-        }).fail(function() {});
+    function updateTabAvailability(isActive) {
+        if (isActive) {
+            $('#tabLibrary').removeClass('disabled');
+            $('#tabQueue').removeClass('disabled');
+        } else {
+            $('#tabLibrary').addClass('disabled');
+            $('#tabQueue').addClass('disabled');
+        }
     }
 
     function updateNowPlaying(data) {
@@ -210,17 +256,26 @@
 
     window.switchTab = function(tab) {
         currentTab = tab;
+
+        // Single tab bar
+        $('#mainTabBar .tab').removeClass('active');
+        $('#panelLibrary, #panelQueue, #panelFiles').hide();
+
         if (tab === 'library') {
             $('#tabLibrary').addClass('active');
-            $('#tabQueue').removeClass('active');
             $('#panelLibrary').show();
-            $('#panelQueue').hide();
-        } else {
+            if (!libraryLoaded) {
+                libraryLoaded = true;
+                loadLibrary();
+            }
+        } else if (tab === 'queue') {
             $('#tabQueue').addClass('active');
-            $('#tabLibrary').removeClass('active');
             $('#panelQueue').show();
-            $('#panelLibrary').hide();
             loadQueue();
+        } else if (tab === 'files') {
+            $('#tabFiles').addClass('active');
+            $('#panelFiles').show();
+            loadFiles();
         }
     };
 
@@ -283,4 +338,148 @@
             callback(data.tracks || []);
         }).fail(function() { callback([]); });
     }
+
+    // File management
+    function loadFiles() {
+        $.getJSON('/karaoke/api/files', function(data) {
+            if (data.success === false && data.error) {
+                fileCache = [];
+                renderFilesError(data.error);
+            } else {
+                fileCache = data.files || [];
+                renderFiles(fileCache);
+            }
+        }).fail(function() {
+            fileCache = [];
+            renderFilesError('无法连接服务器');
+        });
+    }
+
+    function renderFiles(files) {
+        var container = $('#fileList');
+        container.empty();
+        if (files.length === 0) {
+            container.append('<div class="empty-hint"><div class="empty-icon">&#128193;</div>文件夹为空</div>');
+            return;
+        }
+        for (var i = 0; i < files.length; i++) {
+            var file = files[i];
+            var isVideo = file.isVideo;
+            var item = $('<div class="file-item' + (isVideo ? '' : ' non-video') + '">');
+            item.append('<div class="file-icon">' + (isVideo ? '▶' : '◈') + '</div>');
+            item.append('<div class="info"><div class="name">' + escapeHtml(file.name || '') +
+                '</div><div class="meta">' + formatFileSize(file.size || 0) + '</div></div>');
+            var actions = $('<div class="actions">');
+            var renameBtn = $('<button class="action-btn rename">重命名</button>');
+            renameBtn.on('click', (function(fp, nameNoExt) {
+                return function(e) {
+                    e.stopPropagation();
+                    openRenameModal(fp, nameNoExt);
+                };
+            })(file.filePath, file.nameNoExt));
+            var deleteBtn = $('<button class="action-btn delete">删除</button>');
+            deleteBtn.on('click', (function(fp, name) {
+                return function(e) {
+                    e.stopPropagation();
+                    openDeleteModal(fp, name);
+                };
+            })(file.filePath, file.name));
+            actions.append(renameBtn).append(deleteBtn);
+            item.append(actions);
+            container.append(item);
+        }
+    }
+
+    function renderFilesError(message) {
+        var container = $('#fileList');
+        container.empty();
+        container.append('<div class="empty-hint"><div class="empty-icon">&#9888;</div>' + escapeHtml(message) + '</div>');
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes <= 0) return '0 B';
+        var units = ['B', 'KB', 'MB', 'GB'];
+        var i = 0;
+        var size = bytes;
+        while (size >= 1024 && i < units.length - 1) {
+            size = size / 1024;
+            i++;
+        }
+        return size.toFixed(i === 0 ? 0 : 2) + ' ' + units[i];
+    }
+
+    window.openRenameModal = function(filePath, nameNoExt) {
+        renameTargetPath = filePath;
+        $('#renameFileName').text(filePath);
+        $('#renameInput').val(nameNoExt || '');
+        $('#renameModal').addClass('show');
+        setTimeout(function() { $('#renameInput').focus(); }, 50);
+    };
+
+    window.closeRenameModal = function() {
+        $('#renameModal').removeClass('show');
+        renameTargetPath = null;
+    };
+
+    window.confirmRename = function() {
+        if (!renameTargetPath) return;
+        var newName = $('#renameInput').val().trim();
+        if (!newName) {
+            alert('请输入新文件名');
+            return;
+        }
+        $.post('/karaoke/api/renameFile', { filePath: renameTargetPath, newName: newName }, function(data) {
+            if (data.success) {
+                closeRenameModal();
+                libraryLoaded = false;
+                loadFiles();
+                loadLibrary();
+            } else {
+                alert(data.error || '重命名失败');
+            }
+        }, 'json').fail(function() {
+            alert('重命名失败');
+        });
+    };
+
+    window.openDeleteModal = function(filePath, name) {
+        deleteTargetPath = filePath;
+        $('#deleteFileName').text('确定删除 "' + (name || filePath) + '" 吗？此操作不可恢复。');
+        $('#deleteModal').addClass('show');
+    };
+
+    window.closeDeleteModal = function() {
+        $('#deleteModal').removeClass('show');
+        deleteTargetPath = null;
+    };
+
+    window.confirmDelete = function() {
+        if (!deleteTargetPath) return;
+        $.post('/karaoke/api/deleteFile', { filePath: deleteTargetPath }, function(data) {
+            if (data.success) {
+                closeDeleteModal();
+                libraryLoaded = false;
+                loadFiles();
+                loadLibrary();
+            } else {
+                alert(data.error || '删除失败');
+            }
+        }, 'json').fail(function() {
+            alert('删除失败');
+        });
+    };
+
+    window.rescanLibrary = function() {
+        $.post('/karaoke/api/rescan', function(data) {
+            if (data.success) {
+                libraryLoaded = false;
+                loadFiles();
+                loadLibrary();
+            } else {
+                alert(data.error || '刷新失败');
+            }
+        }, 'json').fail(function() {
+            alert('刷新失败');
+        });
+    };
 })();

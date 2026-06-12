@@ -603,6 +603,35 @@ public class KaraokeActivity extends BaseActivity {
         }
     }
 
+    // ======================== Remote Reload ========================
+
+    void remoteReloadFolder() {
+        String folderPath = Hawk.get("karaoke_folder", "");
+        if (folderPath.isEmpty() || !new File(folderPath).exists()) {
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                stopPlaybackAndReturnToSelect();
+                loadFolder(folderPath);
+            }
+        });
+    }
+
+    void stopPlaybackAndReturnToSelect() {
+        if (currentMode == Mode.PLAY) {
+            if (mVideoView != null) {
+                mVideoView.pause();
+                mVideoView.release();
+            }
+            currentPlayingSong = null;
+            lastPlaybackPosition = 0;
+            userPaused = false;
+            enterSelectMode();
+        }
+    }
+
     // ======================== Folder Loading ========================
 
     private void openFolderPicker() {
@@ -630,7 +659,7 @@ public class KaraokeActivity extends BaseActivity {
                 }).show();
     }
 
-    private void loadFolder(String folderPath) {
+    void loadFolder(String folderPath) {
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -639,12 +668,7 @@ public class KaraokeActivity extends BaseActivity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (songs.isEmpty()) {
-                            Toast.makeText(mContext, getString(R.string.karaoke_no_videos), Toast.LENGTH_SHORT).show();
-                            return;
-                        }
-
-                        // Changing folder resets everything
+                        // Changing folder resets everything, even when empty
                         session.setLibrary(songs);
                         session.clearQueue();
                         currentPlayingSong = null;
@@ -652,6 +676,18 @@ public class KaraokeActivity extends BaseActivity {
                         userPaused = false;
                         activeArtist = null;
                         activeSearch = "";
+
+                        if (songs.isEmpty()) {
+                            artistAdapter.setNewData(new ArrayList<String>());
+                            artistAdapter.setSelectedPosition(0);
+                            songGridAdapter.setNewData(new ArrayList<KaraokeSong>());
+                            switchTab(false);
+                            updateQueueTabCount();
+                            updateStartPlayButton();
+                            updateNowPlayingText();
+                            Toast.makeText(mContext, getString(R.string.karaoke_no_videos), Toast.LENGTH_SHORT).show();
+                            return;
+                        }
 
                         // Setup artist sidebar
                         List<String> artists = new ArrayList<>();
