@@ -14,6 +14,8 @@ import androidx.annotation.NonNull;
 
 import com.github.tvbox.osc.R;
 
+import java.util.List;
+
 import xyz.doikki.videoplayer.controller.BaseVideoController;
 import xyz.doikki.videoplayer.player.VideoView;
 import xyz.doikki.videoplayer.util.PlayerUtils;
@@ -45,6 +47,13 @@ public class KaraokeController extends BaseVideoController {
     private TextView tvSeekTime;
     private ImageView ivSeekIcon;
     private ProgressBar pbSeekProgress;
+
+    // Next-up preview (top-right, alongside seek overlay)
+    private LinearLayout llNextUp;
+    private TextView tvNextUp1;
+    private TextView tvNextUp2;
+    private TextView tvNextUp3;
+    private TextView tvNextUpEmpty;
 
     // Fast-forward / rewind state
     private boolean simSlideStart = false;
@@ -99,6 +108,13 @@ public class KaraokeController extends BaseVideoController {
         tvSeekTime = findViewById(R.id.tvSeekTime);
         ivSeekIcon = findViewById(R.id.ivSeekIcon);
         pbSeekProgress = findViewById(R.id.pbSeekProgress);
+
+        llNextUp = findViewById(R.id.llNextUp);
+        tvNextUp1 = findViewById(R.id.tvNextUp1);
+        tvNextUp2 = findViewById(R.id.tvNextUp2);
+        tvNextUp3 = findViewById(R.id.tvNextUp3);
+        tvNextUpEmpty = findViewById(R.id.tvNextUpEmpty);
+        setNextUp(null);
 
         findViewById(R.id.ivPrev).setOnClickListener(new OnClickListener() {
             @Override
@@ -215,10 +231,30 @@ public class KaraokeController extends BaseVideoController {
         ivPlayPause.setImageResource(playing ? R.drawable.v_pause : R.drawable.v_play);
     }
 
+    public void setNextUp(List<String> titles) {
+        boolean empty = titles == null || titles.isEmpty();
+        TextView[] slots = {tvNextUp1, tvNextUp2, tvNextUp3};
+        if (empty) {
+            for (TextView slot : slots) slot.setVisibility(GONE);
+            tvNextUpEmpty.setVisibility(VISIBLE);
+            return;
+        }
+        tvNextUpEmpty.setVisibility(GONE);
+        for (int i = 0; i < slots.length; i++) {
+            if (i < titles.size()) {
+                slots[i].setText(titles.get(i));
+                slots[i].setVisibility(VISIBLE);
+            } else {
+                slots[i].setVisibility(GONE);
+            }
+        }
+    }
+
     @Override
     public void show() {
         llTopBar.setVisibility(VISIBLE);
         llBottomBar.setVisibility(VISIBLE);
+        llNextUp.setVisibility(VISIBLE);
         mShowing = true;
         resetAutoHide();
     }
@@ -228,6 +264,7 @@ public class KaraokeController extends BaseVideoController {
         if (mShowing) {
             llTopBar.setVisibility(GONE);
             llBottomBar.setVisibility(GONE);
+            llNextUp.setVisibility(GONE);
             mShowing = false;
             hideHandler.removeCallbacks(autoHideRunnable);
         }

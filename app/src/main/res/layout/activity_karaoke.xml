@@ -33,7 +33,9 @@
                 android:layout_height="@dimen/vs_40"
                 android:focusable="true"
                 android:background="@drawable/button_dialog_vod"
-                android:src="@drawable/v_back" />
+                android:src="@drawable/v_back"
+                android:nextFocusDown="@id/rvArtists"
+                android:nextFocusRight="@id/etSearch" />
 
             <TextView
                 android:layout_width="wrap_content"
@@ -59,7 +61,10 @@
                 android:paddingRight="@dimen/vs_15"
                 android:textColor="@color/color_FFFFFF_90"
                 android:textColorHint="#70FFFFFF"
-                android:textSize="@dimen/ts_20" />
+                android:textSize="@dimen/ts_20"
+                android:nextFocusDown="@id/rvSongGrid"
+                android:nextFocusLeft="@id/ivBack"
+                android:nextFocusRight="@id/tvChangeFolder" />
 
             <TextView
                 android:id="@+id/tvChangeFolder"
@@ -73,7 +78,10 @@
                 android:paddingRight="@dimen/vs_15"
                 android:text="@string/karaoke_change_folder"
                 android:textColor="@color/color_FFFFFF_90"
-                android:textSize="@dimen/ts_20" />
+                android:textSize="@dimen/ts_20"
+                android:nextFocusDown="@id/rvSongGrid"
+                android:nextFocusLeft="@id/etSearch"
+                android:nextFocusRight="@id/tvTabAll" />
 
             <LinearLayout
                 android:id="@+id/llTabs"
@@ -94,7 +102,10 @@
                     android:paddingRight="@dimen/vs_20"
                     android:text="@string/karaoke_all_songs"
                     android:textColor="@color/color_FFFFFF_90"
-                    android:textSize="@dimen/ts_22" />
+                    android:textSize="@dimen/ts_22"
+                    android:nextFocusDown="@id/rvSongGrid"
+                    android:nextFocusLeft="@id/tvChangeFolder"
+                    android:nextFocusRight="@id/tvTabQueue" />
 
                 <TextView
                     android:id="@+id/tvTabQueue"
@@ -107,7 +118,9 @@
                     android:paddingLeft="@dimen/vs_20"
                     android:paddingRight="@dimen/vs_20"
                     android:textColor="@color/color_FFFFFF_90"
-                    android:textSize="@dimen/ts_22" />
+                    android:textSize="@dimen/ts_22"
+                    android:nextFocusDown="@id/rvSongGrid"
+                    android:nextFocusLeft="@id/tvTabAll" />
 
             </LinearLayout>
 
@@ -128,7 +141,10 @@
                 android:background="#99000000"
                 android:clipChildren="false"
                 android:clipToPadding="false"
-                android:padding="@dimen/vs_5" />
+                android:padding="@dimen/vs_5"
+                android:nextFocusUp="@id/ivBack"
+                android:nextFocusDown="@id/tvStartPlay"
+                android:nextFocusRight="@id/rvSongGrid" />
 
             <!-- Content Area -->
             <FrameLayout
@@ -142,7 +158,10 @@
                     android:layout_height="match_parent"
                     android:clipChildren="false"
                     android:clipToPadding="false"
-                    android:padding="@dimen/vs_10" />
+                    android:padding="@dimen/vs_10"
+                    android:nextFocusUp="@id/etSearch"
+                    android:nextFocusDown="@id/tvStartPlay"
+                    android:nextFocusLeft="@id/rvArtists" />
 
                 <com.owen.tvrecyclerview.widget.TvRecyclerView
                     android:id="@+id/rvQueue"
@@ -151,7 +170,10 @@
                     android:clipChildren="false"
                     android:clipToPadding="false"
                     android:padding="@dimen/vs_10"
-                    android:visibility="gone" />
+                    android:visibility="gone"
+                    android:nextFocusUp="@id/etSearch"
+                    android:nextFocusDown="@id/tvStartPlay"
+                    android:nextFocusLeft="@id/rvArtists" />
 
                 <LinearLayout
                     android:id="@+id/llQRCode"
@@ -215,7 +237,10 @@
                 android:paddingRight="@dimen/vs_20"
                 android:textColor="@color/color_FFFFFF_90"
                 android:textSize="@dimen/ts_22"
-                android:visibility="gone" />
+                android:visibility="gone"
+                android:nextFocusUp="@id/rvSongGrid"
+                android:nextFocusLeft="@id/rvArtists"
+                android:nextFocusRight="@id/ivPlayPauseBottom" />
 
             <ImageView
                 android:id="@+id/ivPlayPauseBottom"
@@ -225,7 +250,10 @@
                 android:background="@drawable/button_dialog_vod"
                 android:focusable="true"
                 android:src="@drawable/v_play"
-                android:visibility="gone" />
+                android:visibility="gone"
+                android:nextFocusUp="@id/rvSongGrid"
+                android:nextFocusLeft="@id/tvStartPlay"
+                android:nextFocusRight="@id/ivNextBottom" />
 
             <ImageView
                 android:id="@+id/ivNextBottom"
@@ -235,7 +263,9 @@
                 android:background="@drawable/button_dialog_vod"
                 android:focusable="true"
                 android:src="@drawable/v_next"
-                android:visibility="gone" />
+                android:visibility="gone"
+                android:nextFocusUp="@id/rvSongGrid"
+                android:nextFocusLeft="@id/ivPlayPauseBottom" />
 
         </LinearLayout>
 

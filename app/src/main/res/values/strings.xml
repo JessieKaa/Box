@@ -37,6 +37,7 @@
     <string name="karaoke_no_videos">No video files found</string>
     <string name="karaoke_play_error">Playback error, skipping to next</string>
     <string name="karaoke_no_more">No more songs</string>
+    <string name="karaoke_next_up">Up next</string>
     <string name="karaoke_continue_play">Continue</string>
     <string name="karaoke_pick_folder">Select MV Folder</string>
     <string name="karaoke_confirm">OK</string>

@@ -48,8 +48,11 @@ import com.owen.tvrecyclerview.widget.TvRecyclerView;
 import com.owen.tvrecyclerview.widget.V7GridLayoutManager;
 import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
+import androidx.recyclerview.widget.GridLayoutManager;
+
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -378,6 +381,80 @@ public class KaraokeActivity extends BaseActivity {
         });
     }
 
+    // ======================== Focus Graph ========================
+
+    /**
+     * Recomputes the bottom-bar focus graph based on whether the bottom controls are visible.
+     * When the bottom controls are GONE (no current song), the middle RVs set nextFocusDown
+     * to themselves so the focus doesn't fall back to geometric FocusFinder behavior.
+     * Also handles empty list states for both the All and Queue tabs.
+     */
+    private void updateFocusGraph() {
+        boolean bottomVisible = tvStartPlay.isShown();
+
+        // Middle → bottom (down)
+        if (bottomVisible) {
+            rvArtists.setNextFocusDownId(R.id.tvStartPlay);
+            rvSongGrid.setNextFocusDownId(R.id.tvStartPlay);
+            rvQueue.setNextFocusDownId(R.id.tvStartPlay);
+        } else {
+            // Self-loop so focus stays in the RV container when bottom is hidden
+            rvArtists.setNextFocusDownId(R.id.rvArtists);
+            rvSongGrid.setNextFocusDownId(R.id.rvSongGrid);
+            rvQueue.setNextFocusDownId(R.id.rvQueue);
+        }
+
+        // Top → middle (down): depends on which tab and list content.
+        // All four top-bar controls share the same target per the focus graph plan.
+        int topDownTarget;
+        if (showingQueue) {
+            // Queue tab is visible
+            if (queueAdapter.getItemCount() == 0) {
+                topDownTarget = R.id.tvTabQueue;
+            } else {
+                topDownTarget = R.id.rvQueue;
+            }
+        } else {
+            // All tab is visible
+            if (songGridAdapter.getItemCount() == 0) {
+                topDownTarget = R.id.tvChangeFolder;
+            } else {
+                topDownTarget = R.id.rvSongGrid;
+            }
+        }
+        etSearch.setNextFocusDownId(topDownTarget);
+        tvTabAll.setNextFocusDownId(topDownTarget);
+        tvTabQueue.setNextFocusDownId(topDownTarget);
+        findViewById(R.id.tvChangeFolder).setNextFocusDownId(topDownTarget);
+
+        // Bottom → middle (up): also close the queue/all cycle
+        int bottomUpTarget = showingQueue ? R.id.rvQueue : R.id.rvSongGrid;
+        tvStartPlay.setNextFocusUpId(bottomUpTarget);
+        ivPlayPauseBottom.setNextFocusUpId(bottomUpTarget);
+        ivNextBottom.setNextFocusUpId(bottomUpTarget);
+    }
+
+    /**
+     * Builds the up-to-3 next-up title list from the session queue and pushes it to the controller.
+     */
+    private void pushNextUpToController() {
+        if (session == null) {
+            mController.setNextUp(Collections.emptyList());
+            return;
+        }
+        List<KaraokeSong> queue = session.getQueue();
+        int curr = session.getCurrentQueueIndex();
+        List<String> next = new ArrayList<>();
+        if (queue != null && curr >= 0) {
+            for (int i = curr + 1; i < queue.size() && next.size() < 3; i++) {
+                KaraokeSong s = queue.get(i);
+                if (s == null) continue;
+                next.add(s.displayName != null ? s.displayName : s.title);
+            }
+        }
+        mController.setNextUp(next);
+    }
+
     // ======================== Mode Switching ========================
 
     private void enterSelectMode() {
@@ -420,6 +497,7 @@ public class KaraokeActivity extends BaseActivity {
             mVideoView.seekTo(lastPlaybackPosition);
             mVideoView.start();
             mController.setSongTitle(currentPlayingSong.displayName);
+            pushNextUpToController();
         } else {
             // New song
             currentPlayingSong = song;
@@ -434,6 +512,7 @@ public class KaraokeActivity extends BaseActivity {
             mController.setSongTitle(song.displayName);
             mController.setTrackInfo("");
             queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+            pushNextUpToController();
         }
     }
 
@@ -451,6 +530,7 @@ public class KaraokeActivity extends BaseActivity {
         mController.setSongTitle(song.displayName);
         mController.setTrackInfo("");
         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+        pushNextUpToController();
     }
 
     private void playNext() {
@@ -504,6 +584,7 @@ public class KaraokeActivity extends BaseActivity {
         updateQueueTabCount();
         updateStartPlayButton();
         songGridAdapter.updateQueuedSet(session.getQueue());
+        updateFocusGraph();
 
         switch (result.action) {
             case SWITCH_TO_SONG:
@@ -525,10 +606,14 @@ public class KaraokeActivity extends BaseActivity {
                 updateNowPlayingText();
                 updateStartPlayButton();
                 if (currentMode == Mode.PLAY) {
+                    mController.setNextUp(Collections.emptyList());
                     enterSelectMode();
                 }
                 break;
             case KEEP_PLAYING:
+                if (currentMode == Mode.PLAY) {
+                    pushNextUpToController();
+                }
                 break;
         }
     }
@@ -555,6 +640,7 @@ public class KaraokeActivity extends BaseActivity {
             rvQueue.setVisibility(View.GONE);
             rebuildVisibleSongs();
         }
+        updateFocusGraph();
     }
 
     private void rebuildVisibleSongs() {
@@ -574,6 +660,7 @@ public class KaraokeActivity extends BaseActivity {
         }
         songGridAdapter.setNewData(filtered);
         songGridAdapter.updateQueuedSet(session.getQueue());
+        updateFocusGraph();
     }
 
     private void updateQueueTabCount() {
@@ -603,6 +690,7 @@ public class KaraokeActivity extends BaseActivity {
             ivPlayPauseBottom.setVisibility(View.GONE);
             ivNextBottom.setVisibility(View.GONE);
         }
+        updateFocusGraph();
     }
 
     private void updateNowPlayingText() {
@@ -808,8 +896,61 @@ public class KaraokeActivity extends BaseActivity {
                 }
                 return true;
             }
+        } else if (currentMode == Mode.SELECT
+                && event.getAction() == KeyEvent.ACTION_DOWN
+                && event.getKeyCode() == KeyEvent.KEYCODE_DPAD_DOWN
+                && currentPlayingSong == null) {
+            // Bottom controls are hidden — prevent focus escaping to geometric fallback,
+            // but only when the focused RV item is already at the bottom edge (or the RV
+            // is empty), so normal intra-RV downward navigation still works.
+            if (shouldConsumeDownAtRvBottom()) {
+                return true;
+            }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    /**
+     * Returns true when the currently focused view sits at the bottom edge of one of our
+     * TvRecyclerViews (or that RV is empty), and the bottom bar is therefore unreachable.
+     * Used by {@link #dispatchKeyEvent} to defensively swallow DPAD_DOWN rather than let
+     * Android's geometric FocusFinder pick an arbitrary target.
+     *
+     * For grids (multiple spans) every item in the last row counts as bottom-edge, not
+     * just the final adapter position.
+     */
+    private boolean shouldConsumeDownAtRvBottom() {
+        View focused = getCurrentFocus();
+        if (focused == null) return false;
+        TvRecyclerView rv = findContainingTvRv(focused);
+        if (rv == null) return false;
+        BaseQuickAdapter<?, ?> adapter = (BaseQuickAdapter<?, ?>) rv.getAdapter();
+        if (adapter == null || adapter.getItemCount() == 0) {
+            // RV is empty: nothing to navigate within, so swallow to keep focus put
+            return true;
+        }
+        int pos = rv.getChildAdapterPosition(focused);
+        // pos == -1 happens when the focused view is no longer attached; treat as bottom
+        if (pos == -1) return true;
+
+        int totalItems = adapter.getItemCount();
+        int spanCount = 1;
+        if (rv.getLayoutManager() instanceof GridLayoutManager) {
+            spanCount = ((GridLayoutManager) rv.getLayoutManager()).getSpanCount();
+        }
+        int lastRowStart = ((totalItems - 1) / spanCount) * spanCount;
+        return pos >= lastRowStart;
+    }
+
+    private TvRecyclerView findContainingTvRv(View view) {
+        android.view.ViewParent p = view.getParent();
+        while (p instanceof View) {
+            if (p == rvArtists) return rvArtists;
+            if (p == rvSongGrid) return rvSongGrid;
+            if (p == rvQueue) return rvQueue;
+            p = p.getParent();
+        }
+        return null;
     }
 
     @Override
@@ -1007,8 +1148,12 @@ public class KaraokeActivity extends BaseActivity {
                     if (showingQueue) {
                         queueAdapter.setNewData(session.getQueue());
                         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+                        updateFocusGraph();
                     } else {
                         songGridAdapter.updateQueuedSet(session.getQueue());
+                    }
+                    if (currentMode == Mode.PLAY) {
+                        pushNextUpToController();
                     }
                 }
                 return;

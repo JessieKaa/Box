@@ -37,6 +37,7 @@
     <string name="karaoke_no_videos">未找到视频文件</string>
     <string name="karaoke_play_error">播放出错，跳到下一首</string>
     <string name="karaoke_no_more">没有更多歌曲了</string>
+<string name="karaoke_next_up">接下来</string>
     <string name="karaoke_continue_play">继续播放</string>
     <string name="karaoke_pick_folder">选择MV文件夹</string>
     <string name="karaoke_confirm">确定</string>
