@@ -1,5 +1,8 @@
 package com.github.tvbox.osc.server;
 
+import android.content.Context;
+
+import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.karaoke.KaraokeRemoteManager;
 import com.github.tvbox.osc.util.FileUtils;
 import com.github.tvbox.osc.util.StorageDriveType;
@@ -24,6 +27,23 @@ public class KaraokeRequestProcess implements RequestProcess {
     private static final long FREE_SPACE_MARGIN = 10L * 1024 * 1024; // 10MB
 
     private final Gson gson = new Gson();
+    private final Context context;
+
+    public KaraokeRequestProcess() {
+        this(null);
+    }
+
+    public KaraokeRequestProcess(Context context) {
+        this.context = context;
+    }
+
+    private String t(int resId, String fallback) {
+        if (context != null) {
+            try { return context.getString(resId); } catch (Throwable ignore) {
+            }
+        }
+        return fallback;
+    }
 
     @Override
     public boolean isRequest(NanoHTTPD.IHTTPSession session, String fileName) {
@@ -339,18 +359,13 @@ public class KaraokeRequestProcess implements RequestProcess {
 
         int newDot = newName.lastIndexOf('.');
         String newNameBody = newName;
-        String newNameExt = "";
         if (newDot > 0 && newDot < newName.length() - 1) {
             newNameBody = newName.substring(0, newDot);
-            newNameExt = newName.substring(newDot).toLowerCase(Locale.ROOT);
         }
 
-        String finalName;
-        if (!originalExt.isEmpty() && newNameExt.equalsIgnoreCase(originalExt)) {
-            finalName = newNameBody + originalExt;
-        } else {
-            finalName = newNameBody + originalExt;
-        }
+        // Always preserve the original extension regardless of what the client sent,
+        // so users can't accidentally strip the .mp4 / .mkv when renaming.
+        String finalName = newNameBody + originalExt;
 
         if (finalName.equalsIgnoreCase(originalName)) {
             return jsonResult(true);
@@ -477,19 +492,26 @@ public class KaraokeRequestProcess implements RequestProcess {
                 File stagingFile = null;
                 try {
                     stagingFile = File.createTempFile(".uploading_", ".tmp", folder);
-                    FileUtils.copyFile(tmpFile, stagingFile);
+                    // Prefer renameTo over copy when both files live on the same mount
+                    // point. The tmp file NanoHTTPD already wrote is on private app
+                    // storage; if the karaoke folder is the same filesystem we save
+                    // one full read+write. Cross-mount falls back to copy.
+                    boolean moved = stagingFile.delete() && tmpFile.renameTo(stagingFile);
+                    if (!moved) {
+                        FileUtils.copyFile(tmpFile, stagingFile);
+                    }
                     if (!stagingFile.renameTo(dest)) {
                         stagingFile.delete();
-                        results.add(makeFileResult(displayName, false, "重命名失败"));
+                        results.add(makeFileResult(displayName, false, t(R.string.karaoke_error_invalid_path, "重命名失败")));
                         continue;
                     }
                 } catch (IOException e) {
                     if (stagingFile != null) stagingFile.delete();
-                    results.add(makeFileResult(displayName, false, "拷贝失败"));
+                    results.add(makeFileResult(displayName, false, t(R.string.karaoke_error_invalid_path, "拷贝失败")));
                     continue;
                 } catch (Throwable t) {
                     if (stagingFile != null) stagingFile.delete();
-                    results.add(makeFileResult(displayName, false, "拷贝失败"));
+                    results.add(makeFileResult(displayName, false, t(R.string.karaoke_error_invalid_path, "拷贝失败")));
                     continue;
                 }
 

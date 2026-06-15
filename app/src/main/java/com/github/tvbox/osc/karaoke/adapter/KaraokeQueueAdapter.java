@@ -1,29 +1,72 @@
 package com.github.tvbox.osc.karaoke.adapter;
 
 import android.view.View;
-import android.view.animation.BounceInterpolator;
 import android.widget.ImageView;
 
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
+import com.chad.library.adapter.base.diff.BaseQuickDiffCallback;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 
+import java.util.List;
+
 public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewHolder> {
 
-    private int currentlyPlayingIndex = -1;
-    private OnItemDeleteListener deleteListener;
+    public interface OnItemClickListener {
+        void onItemClick(int position);
+    }
 
     public interface OnItemDeleteListener {
         void onItemDelete(int position);
+    }
+
+    public interface OnFavoriteClickListener {
+        void onFavoriteClick(int position, KaraokeSong song);
+    }
+
+    private int currentlyPlayingIndex = -1;
+    private OnItemClickListener itemClickListener;
+    private OnItemDeleteListener deleteListener;
+    private OnFavoriteClickListener favoriteClickListener;
+
+    private static class KaraokeQueueDiffCallback extends BaseQuickDiffCallback<KaraokeSong> {
+        public KaraokeQueueDiffCallback(List<KaraokeSong> newList) {
+            super(newList);
+        }
+
+        @Override
+        public boolean areItemsTheSame(KaraokeSong oldItem, KaraokeSong newItem) {
+            return oldItem != null && newItem != null
+                    && oldItem.filePath != null && oldItem.filePath.equals(newItem.filePath);
+        }
+
+        @Override
+        public boolean areContentsTheSame(KaraokeSong oldItem, KaraokeSong newItem) {
+            return eq(oldItem.title, newItem.title)
+                    && eq(oldItem.artist, newItem.artist)
+                    && oldItem.favorite == newItem.favorite;
+        }
+
+        private boolean eq(String a, String b) {
+            return a == null ? b == null : a.equals(b);
+        }
     }
 
     public KaraokeQueueAdapter() {
         super(R.layout.item_karaoke_queue, null);
     }
 
+    public void setItemClickListener(OnItemClickListener listener) {
+        this.itemClickListener = listener;
+    }
+
     public void setDeleteListener(OnItemDeleteListener listener) {
         this.deleteListener = listener;
+    }
+
+    public void setFavoriteClickListener(OnFavoriteClickListener listener) {
+        this.favoriteClickListener = listener;
     }
 
     @Override
@@ -36,7 +79,35 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
         ImageView ivPlaying = helper.getView(R.id.ivPlaying);
         ivPlaying.setVisibility(pos == currentlyPlayingIndex ? View.VISIBLE : View.INVISIBLE);
 
-        // Touch: tap delete button
+        // Main content area = "play" target. D-pad OK on this row plays the song.
+        View itemMain = helper.getView(R.id.itemMain);
+        if (itemMain != null) {
+            itemMain.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (itemClickListener != null) {
+                        itemClickListener.onItemClick(helper.getAdapterPosition());
+                    }
+                }
+            });
+            itemMain.setOnFocusChangeListener(KaraokeFocusHelper.listFocusListener());
+        }
+
+        ImageView ivFavorite = helper.getView(R.id.ivFavorite);
+        if (ivFavorite != null) {
+            ivFavorite.setVisibility(View.VISIBLE);
+            ivFavorite.setImageResource(item.favorite ? R.drawable.icon_collect : R.drawable.icon_no_collect);
+            ivFavorite.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (favoriteClickListener != null) {
+                        favoriteClickListener.onFavoriteClick(helper.getAdapterPosition(), item);
+                    }
+                }
+            });
+            ivFavorite.setOnFocusChangeListener(KaraokeFocusHelper.listFocusListener());
+        }
+
         ImageView ivDelete = helper.getView(R.id.ivDelete);
         ivDelete.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -46,8 +117,9 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
                 }
             }
         });
+        ivDelete.setOnFocusChangeListener(KaraokeFocusHelper.listFocusListener());
 
-        // D-pad: long press row to delete
+        // Keep touch long-press as a fallback delete affordance on the empty padding area.
         View itemView = helper.getConvertView();
         itemView.setOnLongClickListener(new View.OnLongClickListener() {
             @Override
@@ -58,17 +130,6 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
                 return true;
             }
         });
-
-        itemView.setOnFocusChangeListener(new View.OnFocusChangeListener() {
-            @Override
-            public void onFocusChange(View v, boolean hasFocus) {
-                if (hasFocus) {
-                    v.animate().scaleX(1.02f).scaleY(1.02f).setDuration(300).setInterpolator(new BounceInterpolator()).start();
-                } else {
-                    v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(300).setInterpolator(new BounceInterpolator()).start();
-                }
-            }
-        });
     }
 
     public void setCurrentlyPlaying(int index) {
@@ -76,5 +137,22 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
         currentlyPlayingIndex = index;
         if (old >= 0 && old < getData().size()) notifyItemChanged(old);
         if (currentlyPlayingIndex >= 0 && currentlyPlayingIndex < getData().size()) notifyItemChanged(currentlyPlayingIndex);
+    }
+
+    /** Replaces the dataset using DiffUtil so D-pad focus position is preserved. */
+    public void setNewDiffData(List<KaraokeSong> list) {
+        setNewDiffData(new KaraokeQueueDiffCallback(list != null ? list : new java.util.ArrayList<KaraokeSong>()));
+    }
+
+    /** Notify only rows whose underlying song matches the given path (e.g. favorite toggle). */
+    public void notifyFavoriteChanged(String filePath) {
+        if (filePath == null) return;
+        int n = getData() == null ? 0 : getData().size();
+        for (int i = 0; i < n; i++) {
+            KaraokeSong item = getItem(i);
+            if (item != null && filePath.equals(item.filePath)) {
+                notifyItemChanged(i);
+            }
+        }
     }
 }

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Active tab + D-pad focus: solid theme color with white border -->
+    <item android:state_selected="true" android:state_focused="true">
+        <shape>
+            <corners android:radius="@dimen/vs_10" />
+            <solid android:color="?attr/color_theme" />
+            <stroke android:width="2mm" android:color="@android:color/white" />
+        </shape>
+    </item>
+    <!-- Active tab (current content): solid theme color highlight -->
+    <item android:state_selected="true">
+        <shape>
+            <corners android:radius="@dimen/vs_10" />
+            <solid android:color="?attr/color_theme" />
+        </shape>
+    </item>
+    <!-- Inactive tab + D-pad focus: gray with white border -->
+    <item android:state_focused="true">
+        <shape>
+            <corners android:radius="@dimen/vs_10" />
+            <solid android:color="@color/color_3D3D3D_50" />
+            <stroke android:width="2mm" android:color="@android:color/white" />
+        </shape>
+    </item>
+    <!-- Inactive tab default: gray -->
+    <item>
+        <shape>
+            <corners android:radius="@dimen/vs_10" />
+            <solid android:color="@color/color_3D3D3D_50" />
+        </shape>
+    </item>
+</selector>

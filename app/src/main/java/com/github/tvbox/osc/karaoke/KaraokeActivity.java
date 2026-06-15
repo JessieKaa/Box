@@ -6,6 +6,7 @@ import android.content.Context;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
@@ -27,21 +28,26 @@ import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.base.BaseActivity;
+import com.github.tvbox.osc.cache.RoomDataManger;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeArtistAdapter;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeQueueAdapter;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeSongGridAdapter;
 import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 import com.github.tvbox.osc.karaoke.controller.KaraokeController;
+import com.github.tvbox.osc.karaoke.lyric.KaraokeLyricLoader;
 import com.github.tvbox.osc.karaoke.playlist.KaraokeSession;
 import com.github.tvbox.osc.karaoke.util.KaraokeFileScanner;
 import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.player.IjkmPlayer;
 import com.github.tvbox.osc.player.MyVideoView;
+import com.github.tvbox.osc.player.TrackAwarePlayer;
 import com.github.tvbox.osc.player.TrackInfo;
 import com.github.tvbox.osc.player.TrackInfoBean;
+import com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.tv.QRCodeGen;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
+import com.github.tvbox.osc.util.HawkConfig;
 import com.obsez.android.lib.filechooser.ChooserDialog;
 import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
@@ -65,26 +71,38 @@ import xyz.doikki.videoplayer.render.TextureRenderViewFactory;
 public class KaraokeActivity extends BaseActivity {
 
     enum Mode { SELECT, PLAY }
+    enum Tab { ALL, QUEUE, FAVORITES }
 
     private Mode currentMode = Mode.SELECT;
     private KaraokeSong currentPlayingSong = null;
+    private KaraokeSong currentSongForLyric = null;
     private long lastPlaybackPosition = 0;
     private boolean userPaused = false;
-    private int savedAudioTrackIndex = -1;
+    private int savedAudioTrackId = -1;
     private boolean pendingAudioTrackApply = false;
+    private int errorCount = 0;
+
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingErrorPlay = null;
+    private Runnable pendingAudioSwitch = null;
+    private KaraokeFileScannerImpl scanCancelSignal = null;
+    private KaraokeLyricLoader lyricLoader;
 
     private MyVideoView mVideoView;
     private KaraokeController mController;
     private KaraokeSession session;
+    private SimpleSubtitleView karaokeSubtitleView;
 
     // Select layer views
     private LinearLayout llSelectLayer;
     private EditText etSearch;
     private TextView tvTabAll;
     private TextView tvTabQueue;
+    private TextView tvTabFavorites;
     private TvRecyclerView rvArtists;
     private TvRecyclerView rvSongGrid;
     private TvRecyclerView rvQueue;
+    private TvRecyclerView rvFavorites;
     private TextView tvNowPlaying;
     private TextView tvStartPlay;
     private ImageView ivPlayPauseBottom;
@@ -94,13 +112,14 @@ public class KaraokeActivity extends BaseActivity {
 
     // Adapters
     private KaraokeSongGridAdapter songGridAdapter;
+    private KaraokeSongGridAdapter favoriteAdapter;
     private KaraokeQueueAdapter queueAdapter;
     private KaraokeArtistAdapter artistAdapter;
 
     // Filter state
     private String activeArtist = null;
     private String activeSearch = "";
-    private boolean showingQueue = false;
+    private Tab activeTab = Tab.ALL;
 
     @Override
     protected int getLayoutResID() {
@@ -111,6 +130,7 @@ public class KaraokeActivity extends BaseActivity {
     protected void init() {
         hideSystemUI(false);
         session = new KaraokeSession();
+        lyricLoader = new KaraokeLyricLoader(this);
 
         // Video player setup
         mVideoView = findViewById(R.id.mVideoView);
@@ -159,17 +179,28 @@ public class KaraokeActivity extends BaseActivity {
             @Override
             public void onPlayStateChanged(int playState) {
                 if (playState == VideoView.STATE_PLAYBACK_COMPLETED) {
+                    errorCount = 0;
                     playNext();
                 } else if (playState == VideoView.STATE_ERROR) {
+                    errorCount++;
                     Toast.makeText(mContext, getString(R.string.karaoke_play_error), Toast.LENGTH_SHORT).show();
-                    new Handler().postDelayed(new Runnable() {
+                    if (errorCount > 3) {
+                        Toast.makeText(mContext, getString(R.string.karaoke_error_too_many), Toast.LENGTH_LONG).show();
+                        enterSelectMode();
+                        return;
+                    }
+                    if (pendingErrorPlay != null) mainHandler.removeCallbacks(pendingErrorPlay);
+                    pendingErrorPlay = new Runnable() {
                         @Override
                         public void run() {
+                            pendingErrorPlay = null;
                             playNext();
                         }
-                    }, 1500);
+                    };
+                    mainHandler.postDelayed(pendingErrorPlay, 1500);
                 } else if (playState == VideoView.STATE_PLAYING) {
-                    if (pendingAudioTrackApply && savedAudioTrackIndex > 0) {
+                    errorCount = 0;
+                    if (pendingAudioTrackApply && savedAudioTrackId > 0) {
                         if (applySavedAudioTrack()) {
                             pendingAudioTrackApply = false;
                         }
@@ -183,15 +214,20 @@ public class KaraokeActivity extends BaseActivity {
         etSearch = findViewById(R.id.etSearch);
         tvTabAll = findViewById(R.id.tvTabAll);
         tvTabQueue = findViewById(R.id.tvTabQueue);
+        tvTabFavorites = findViewById(R.id.tvTabFavorites);
         rvArtists = findViewById(R.id.rvArtists);
         rvSongGrid = findViewById(R.id.rvSongGrid);
         rvQueue = findViewById(R.id.rvQueue);
+        rvFavorites = findViewById(R.id.rvFavorites);
         tvNowPlaying = findViewById(R.id.tvNowPlaying);
         tvStartPlay = findViewById(R.id.tvStartPlay);
         ivPlayPauseBottom = findViewById(R.id.ivPlayPauseBottom);
         ivNextBottom = findViewById(R.id.ivNextBottom);
         llQRCode = findViewById(R.id.llQRCode);
         ivQRCode = findViewById(R.id.ivQRCode);
+
+        // Karaoke lyric view (lives inside the play-mode controller)
+        karaokeSubtitleView = mController.getLyricView();
 
         generateQRCode();
 
@@ -204,7 +240,7 @@ public class KaraokeActivity extends BaseActivity {
         updateNowPlayingText();
 
         // Load saved folder or pick one
-        String savedFolder = Hawk.get("karaoke_folder", "");
+        String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
         if (!savedFolder.isEmpty() && new File(savedFolder).exists()) {
             loadFolder(savedFolder);
         } else {
@@ -236,6 +272,12 @@ public class KaraokeActivity extends BaseActivity {
         songGridAdapter = new KaraokeSongGridAdapter();
         rvSongGrid.setLayoutManager(new V7GridLayoutManager(this, 3));
         rvSongGrid.setAdapter(songGridAdapter);
+        songGridAdapter.setFavoriteClickListener(new KaraokeSongGridAdapter.OnFavoriteClickListener() {
+            @Override
+            public void onFavoriteClick(int position, KaraokeSong song) {
+                toggleFavorite(song);
+            }
+        });
         songGridAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
             @Override
             public void onItemClick(BaseQuickAdapter adapter, View view, int position) {
@@ -253,25 +295,58 @@ public class KaraokeActivity extends BaseActivity {
             }
         });
 
-        // Queue list
-        queueAdapter = new KaraokeQueueAdapter();
-        queueAdapter.setDeleteListener(new KaraokeQueueAdapter.OnItemDeleteListener() {
+        // Favorites grid (reuses the same adapter class)
+        favoriteAdapter = new KaraokeSongGridAdapter();
+        rvFavorites.setLayoutManager(new V7GridLayoutManager(this, 3));
+        rvFavorites.setAdapter(favoriteAdapter);
+        favoriteAdapter.setFavoriteClickListener(new KaraokeSongGridAdapter.OnFavoriteClickListener() {
             @Override
-            public void onItemDelete(int position) {
-                onRemoveFromQueue(position);
+            public void onFavoriteClick(int position, KaraokeSong song) {
+                toggleFavorite(song);
             }
         });
-        rvQueue.setLayoutManager(new V7LinearLayoutManager(this));
-        rvQueue.setAdapter(queueAdapter);
-        queueAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
+        favoriteAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
             @Override
             public void onItemClick(BaseQuickAdapter adapter, View view, int position) {
+                KaraokeSong song = favoriteAdapter.getItem(position);
+                if (song == null) return;
+                if (session.isInQueue(song)) {
+                    Toast.makeText(mContext, getString(R.string.karaoke_already_queued), Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                session.addToQueue(song);
+                Toast.makeText(mContext, String.format(getString(R.string.karaoke_add_to_queue), song.title), Toast.LENGTH_SHORT).show();
+                favoriteAdapter.updateQueuedSet(session.getQueue());
+                updateQueueTabCount();
+                updateStartPlayButton();
+            }
+        });
+
+        // Queue list
+        queueAdapter = new KaraokeQueueAdapter();
+        queueAdapter.setItemClickListener(new KaraokeQueueAdapter.OnItemClickListener() {
+            @Override
+            public void onItemClick(int position) {
                 // Play the selected queue song
                 session.playAt(position);
                 playSong(session.getCurrentSong());
                 enterPlayMode(session.getCurrentSong());
             }
         });
+        queueAdapter.setDeleteListener(new KaraokeQueueAdapter.OnItemDeleteListener() {
+            @Override
+            public void onItemDelete(int position) {
+                onRemoveFromQueue(position);
+            }
+        });
+        queueAdapter.setFavoriteClickListener(new KaraokeQueueAdapter.OnFavoriteClickListener() {
+            @Override
+            public void onFavoriteClick(int position, KaraokeSong song) {
+                toggleFavorite(song);
+            }
+        });
+        rvQueue.setLayoutManager(new V7LinearLayoutManager(this));
+        rvQueue.setAdapter(queueAdapter);
     }
 
     private void initTopBar() {
@@ -325,7 +400,7 @@ public class KaraokeActivity extends BaseActivity {
         tvTabAll.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                switchTab(false);
+                switchTab(Tab.ALL);
             }
         });
 
@@ -333,7 +408,23 @@ public class KaraokeActivity extends BaseActivity {
         tvTabQueue.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                switchTab(true);
+                switchTab(Tab.QUEUE);
+            }
+        });
+
+        // Tab: Favorites
+        tvTabFavorites.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                switchTab(Tab.FAVORITES);
+            }
+        });
+
+        // Settings (recursive scan + lyric toggle)
+        findViewById(R.id.tvSettings).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openKaraokeSettings();
             }
         });
 
@@ -397,38 +488,40 @@ public class KaraokeActivity extends BaseActivity {
             rvArtists.setNextFocusDownId(R.id.tvStartPlay);
             rvSongGrid.setNextFocusDownId(R.id.tvStartPlay);
             rvQueue.setNextFocusDownId(R.id.tvStartPlay);
+            rvFavorites.setNextFocusDownId(R.id.tvStartPlay);
         } else {
             // Self-loop so focus stays in the RV container when bottom is hidden
             rvArtists.setNextFocusDownId(R.id.rvArtists);
             rvSongGrid.setNextFocusDownId(R.id.rvSongGrid);
             rvQueue.setNextFocusDownId(R.id.rvQueue);
+            rvFavorites.setNextFocusDownId(R.id.rvFavorites);
         }
 
         // Top → middle (down): depends on which tab and list content.
-        // All four top-bar controls share the same target per the focus graph plan.
         int topDownTarget;
-        if (showingQueue) {
-            // Queue tab is visible
-            if (queueAdapter.getItemCount() == 0) {
-                topDownTarget = R.id.tvTabQueue;
-            } else {
-                topDownTarget = R.id.rvQueue;
-            }
+        if (activeTab == Tab.QUEUE) {
+            topDownTarget = queueAdapter.getItemCount() == 0 ? R.id.tvTabQueue : R.id.rvQueue;
+        } else if (activeTab == Tab.FAVORITES) {
+            topDownTarget = favoriteAdapter.getItemCount() == 0 ? R.id.tvTabFavorites : R.id.rvFavorites;
         } else {
-            // All tab is visible
-            if (songGridAdapter.getItemCount() == 0) {
-                topDownTarget = R.id.tvChangeFolder;
-            } else {
-                topDownTarget = R.id.rvSongGrid;
-            }
+            topDownTarget = songGridAdapter.getItemCount() == 0 ? R.id.tvChangeFolder : R.id.rvSongGrid;
         }
         etSearch.setNextFocusDownId(topDownTarget);
         tvTabAll.setNextFocusDownId(topDownTarget);
         tvTabQueue.setNextFocusDownId(topDownTarget);
+        tvTabFavorites.setNextFocusDownId(topDownTarget);
+        findViewById(R.id.tvSettings).setNextFocusDownId(topDownTarget);
         findViewById(R.id.tvChangeFolder).setNextFocusDownId(topDownTarget);
 
         // Bottom → middle (up): also close the queue/all cycle
-        int bottomUpTarget = showingQueue ? R.id.rvQueue : R.id.rvSongGrid;
+        int bottomUpTarget;
+        if (activeTab == Tab.QUEUE) {
+            bottomUpTarget = R.id.rvQueue;
+        } else if (activeTab == Tab.FAVORITES) {
+            bottomUpTarget = R.id.rvFavorites;
+        } else {
+            bottomUpTarget = R.id.rvSongGrid;
+        }
         tvStartPlay.setNextFocusUpId(bottomUpTarget);
         ivPlayPauseBottom.setNextFocusUpId(bottomUpTarget);
         ivNextBottom.setNextFocusUpId(bottomUpTarget);
@@ -465,6 +558,15 @@ public class KaraokeActivity extends BaseActivity {
             mVideoView.pause();
         }
         lastPlaybackPosition = mVideoView.getCurrentPosition();
+        persistCurrentPlaybackPosition();
+
+        // Cancel pending lyric loads so stale callbacks don't fire on the select screen.
+        if (lyricLoader != null) lyricLoader.cancelAll();
+        currentSongForLyric = null;
+        if (karaokeSubtitleView != null) {
+            karaokeSubtitleView.setVisibility(View.GONE);
+            karaokeSubtitleView.reset();
+        }
 
         mVideoView.setVisibility(View.GONE);
         llSelectLayer.setVisibility(View.VISIBLE);
@@ -474,9 +576,11 @@ public class KaraokeActivity extends BaseActivity {
         updateStartPlayButton();
         updateQueueTabCount();
 
-        if (showingQueue) {
-            queueAdapter.setNewData(session.getQueue());
+        if (activeTab == Tab.QUEUE) {
+            queueAdapter.setNewDiffData(session.getQueue());
             queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+        } else if (activeTab == Tab.FAVORITES) {
+            loadFavorites();
         } else {
             songGridAdapter.updateQueuedSet(session.getQueue());
         }
@@ -498,22 +602,100 @@ public class KaraokeActivity extends BaseActivity {
             mVideoView.start();
             mController.setSongTitle(currentPlayingSong.displayName);
             pushNextUpToController();
+            startLyricForSong(currentPlayingSong);
         } else {
-            // New song
-            currentPlayingSong = song;
-            lastPlaybackPosition = 0;
+            // New song — pull history for resume position
+            KaraokeSong loaded = song;
+            long resumeMs = 0;
+            com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(song.filePath);
+            if (h != null && h.playbackPosition > 5000 && h.duration > h.playbackPosition + 1000) {
+                resumeMs = h.playbackPosition;
+                loaded.duration = h.duration;
+            }
+            loaded.favorite = RoomDataManger.isKaraokeFavorite(song.filePath);
+            currentPlayingSong = loaded;
+            lastPlaybackPosition = resumeMs;
             pendingAudioTrackApply = true;
             mVideoView.release();
-            mVideoView.setUrl(song.filePath);
+            mVideoView.setUrl(loaded.filePath);
             mVideoView.setVisibility(View.VISIBLE);
             llSelectLayer.setVisibility(View.GONE);
             llQRCode.setVisibility(View.GONE);
             mVideoView.start();
-            mController.setSongTitle(song.displayName);
+            mController.setSongTitle(loaded.displayName);
             mController.setTrackInfo("");
             queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
             pushNextUpToController();
+            recordKaraokeHistory(loaded, resumeMs);
+            startLyricForSong(loaded);
         }
+    }
+
+    private void startLyricForSong(KaraokeSong song) {
+        currentSongForLyric = song;
+        boolean lyricEnabled = Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true);
+        if (!lyricEnabled || lyricLoader == null || karaokeSubtitleView == null) {
+            karaokeSubtitleView.setVisibility(View.GONE);
+            return;
+        }
+        lyricLoader.loadFor(song, new KaraokeLyricLoader.Callback() {
+            @Override
+            public void onLyricReady(KaraokeSong requested, com.github.tvbox.osc.subtitle.model.TimedTextObject tto) {
+                if (currentSongForLyric == null || !currentSongForLyric.equals(requested)) return;
+                karaokeSubtitleView.bindToMediaPlayer(mVideoView.getMediaPlayer());
+                // FormatLRC.toFile() emits real `[mm:ss.xx]lyric` lines so SubtitleLoader's
+                // extension-based dispatch routes the temp file back to FormatLRC.
+                try {
+                    File tmp = new File(getCacheDir(), "karaoke_lyric_" + requested.filePath.hashCode() + ".lrc");
+                    String[] lines = tto != null ? new com.github.tvbox.osc.subtitle.format.FormatLRC().toFile(tto) : null;
+                    if (lines == null || lines.length == 0) {
+                        karaokeSubtitleView.setVisibility(View.GONE);
+                        return;
+                    }
+                    java.io.PrintWriter pw = new java.io.PrintWriter(tmp, "UTF-8");
+                    try {
+                        for (String s : lines) pw.println(s);
+                    } finally {
+                        pw.close();
+                    }
+                    karaokeSubtitleView.setSubtitlePath(tmp.getAbsolutePath());
+                    karaokeSubtitleView.setVisibility(View.VISIBLE);
+                } catch (Throwable t) {
+                    karaokeSubtitleView.setVisibility(View.GONE);
+                }
+            }
+
+            @Override
+            public void onNoLyric(KaraokeSong requested) {
+                if (currentSongForLyric == null || !currentSongForLyric.equals(requested)) return;
+                if (karaokeSubtitleView != null) {
+                    karaokeSubtitleView.setVisibility(View.GONE);
+                    karaokeSubtitleView.reset();
+                }
+            }
+        });
+    }
+
+    private void recordKaraokeHistory(final KaraokeSong song, final long playbackPosition) {
+        if (song == null || song.filePath == null) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                RoomDataManger.insertKaraokeHistory(song, playbackPosition);
+            }
+        }).start();
+    }
+
+    private void persistCurrentPlaybackPosition() {
+        final KaraokeSong song = currentPlayingSong;
+        if (song == null || song.filePath == null) return;
+        final long position = lastPlaybackPosition;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                RoomDataManger.updateKaraokePlaybackPosition(song.filePath, position);
+            }
+        }).start();
     }
 
     // ======================== Playback ========================
@@ -531,6 +713,8 @@ public class KaraokeActivity extends BaseActivity {
         mController.setTrackInfo("");
         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
         pushNextUpToController();
+        recordKaraokeHistory(song, 0);
+        startLyricForSong(song);
     }
 
     private void playNext() {
@@ -579,7 +763,7 @@ public class KaraokeActivity extends BaseActivity {
 
     private void onRemoveFromQueue(int position) {
         KaraokeSession.RemoveResult result = session.removeFromQueue(position);
-        queueAdapter.setNewData(session.getQueue());
+        queueAdapter.setNewDiffData(session.getQueue());
         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
         updateQueueTabCount();
         updateStartPlayButton();
@@ -628,19 +812,91 @@ public class KaraokeActivity extends BaseActivity {
         }
     }
 
-    private void switchTab(boolean toQueue) {
-        showingQueue = toQueue;
-        if (toQueue) {
-            rvSongGrid.setVisibility(View.GONE);
-            rvQueue.setVisibility(View.VISIBLE);
-            queueAdapter.setNewData(session.getQueue());
+    private void switchTab(Tab tab) {
+        activeTab = tab;
+        rvSongGrid.setVisibility(tab == Tab.ALL ? View.VISIBLE : View.GONE);
+        rvQueue.setVisibility(tab == Tab.QUEUE ? View.VISIBLE : View.GONE);
+        rvFavorites.setVisibility(tab == Tab.FAVORITES ? View.VISIBLE : View.GONE);
+        tvTabAll.setSelected(tab == Tab.ALL);
+        tvTabQueue.setSelected(tab == Tab.QUEUE);
+        tvTabFavorites.setSelected(tab == Tab.FAVORITES);
+        if (tab == Tab.QUEUE) {
+            queueAdapter.setNewDiffData(session.getQueue());
             queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
-        } else {
-            rvSongGrid.setVisibility(View.VISIBLE);
-            rvQueue.setVisibility(View.GONE);
+        } else if (tab == Tab.ALL) {
             rebuildVisibleSongs();
+        } else if (tab == Tab.FAVORITES) {
+            loadFavorites();
         }
         updateFocusGraph();
+    }
+
+    private void loadFavorites() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<KaraokeSong> favorites = new ArrayList<>();
+                try {
+                    for (com.github.tvbox.osc.cache.KaraokeFavorite f : RoomDataManger.getKaraokeFavorites()) {
+                        favorites.add(KaraokeSong.fromFavorite(f));
+                    }
+                } catch (Throwable ignore) {
+                }
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        session.setFavorites(favorites);
+                        favoriteAdapter.setNewDiffData(favorites);
+                        favoriteAdapter.updateQueuedSet(session.getQueue());
+                        updateFocusGraph();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void toggleFavorite(final KaraokeSong song) {
+        if (song == null || song.filePath == null) return;
+        final String path = song.filePath;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean isFav = RoomDataManger.toggleKaraokeFavorite(song);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        // Synchronize the favorite flag across every backing dataset that may hold
+                        // a different KaraokeSong instance for the same path. Queue items are added
+                        // by reference from the library; favorites-grid items are re-hydrated from
+                        // Room rows. Without touching each dataset, the heart on the unchanged rows
+                        // keeps showing the stale value after a notifyItemChanged rebind.
+                        applyFavoriteTo(session.getLibrary(), path, isFav);
+                        applyFavoriteTo(session.getQueue(), path, isFav);
+                        applyFavoriteTo(session.getFavorites(), path, isFav);
+                        applyFavoriteTo(favoriteAdapter.getData(), path, isFav);
+                        applyFavoriteTo(queueAdapter.getData(), path, isFav);
+                        // Targeted refresh: only notify rows whose song matches this path so D-pad
+                        // focus is preserved across the whole library grid + queue + favorites grid.
+                        songGridAdapter.notifyFavoriteChanged(path);
+                        favoriteAdapter.notifyFavoriteChanged(path);
+                        queueAdapter.notifyFavoriteChanged(path);
+                        Toast.makeText(mContext, getString(isFav
+                                ? R.string.karaoke_favorite_added
+                                : R.string.karaoke_favorite_removed), Toast.LENGTH_SHORT).show();
+                        if (activeTab == Tab.FAVORITES) loadFavorites();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private static void applyFavoriteTo(List<KaraokeSong> list, String path, boolean fav) {
+        if (list == null || path == null) return;
+        for (KaraokeSong s : list) {
+            if (s != null && path.equals(s.filePath)) {
+                s.favorite = fav;
+            }
+        }
     }
 
     private void rebuildVisibleSongs() {
@@ -658,7 +914,7 @@ public class KaraokeActivity extends BaseActivity {
             }
             filtered.add(song);
         }
-        songGridAdapter.setNewData(filtered);
+        songGridAdapter.setNewDiffData(filtered);
         songGridAdapter.updateQueuedSet(session.getQueue());
         updateFocusGraph();
     }
@@ -666,6 +922,82 @@ public class KaraokeActivity extends BaseActivity {
     private void updateQueueTabCount() {
         int count = session.getQueueSize();
         tvTabQueue.setText(String.format(getString(R.string.karaoke_queued_songs), count));
+    }
+
+    private void openKaraokeSettings() {
+        final SelectDialog<String> dialog = new SelectDialog<>(this);
+        dialog.setTip(getString(R.string.karaoke_settings));
+        final String optRecursive = formatToggle(R.string.karaoke_settings_scan_recursive,
+                Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true));
+        final String optLyric = formatToggle(R.string.karaoke_settings_lyric,
+                Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true));
+        final String optRescan = getString(R.string.karaoke_settings_rescan);
+        final String[] items = new String[] { optRecursive, optLyric, optRescan };
+        final boolean[] state = new boolean[] {
+                Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true),
+                Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true),
+                false
+        };
+        java.util.List<String> data = new java.util.ArrayList<>(java.util.Arrays.asList(items));
+        dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<String>() {
+            @Override
+            public void click(String value, int pos) {
+                dialog.dismiss();
+                if (pos == 0) {
+                    boolean newVal = !state[0];
+                    Hawk.put(HawkConfig.KARAOKE_SCAN_RECURSIVE, newVal);
+                    Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_scan_recursive, newVal),
+                            Toast.LENGTH_SHORT).show();
+                    // Setting change invalidates cached signature; reload to apply.
+                    String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                    if (!folder.isEmpty() && new File(folder).exists()) {
+                        loadFolder(folder);
+                    }
+                } else if (pos == 1) {
+                    boolean newVal = !state[1];
+                    Hawk.put(HawkConfig.KARAOKE_LYRIC_ENABLED, newVal);
+                    Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_lyric, newVal),
+                            Toast.LENGTH_SHORT).show();
+                    if (!newVal && currentMode == Mode.PLAY && karaokeSubtitleView != null) {
+                        karaokeSubtitleView.setVisibility(View.GONE);
+                        karaokeSubtitleView.reset();
+                        if (lyricLoader != null) lyricLoader.cancelAll();
+                    } else if (newVal && currentMode == Mode.PLAY && currentPlayingSong != null) {
+                        startLyricForSong(currentPlayingSong);
+                    }
+                } else if (pos == 2) {
+                    String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                    if (!folder.isEmpty() && new File(folder).exists()) {
+                        stopPlaybackAndReturnToSelect();
+                        loadFolder(folder);
+                    } else {
+                        Toast.makeText(mContext, getString(R.string.karaoke_error_no_folder), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+
+            @Override
+            public String getDisplay(String val) {
+                return val;
+            }
+        }, new DiffUtil.ItemCallback<String>() {
+            @Override
+            public boolean areItemsTheSame(@NonNull String oldItem, @NonNull String newItem) {
+                return oldItem.equals(newItem);
+            }
+
+            @Override
+            public boolean areContentsTheSame(@NonNull String oldItem, @NonNull String newItem) {
+                return oldItem.equals(newItem);
+            }
+        }, data, 0);
+        dialog.show();
+    }
+
+    private String formatToggle(int resId, boolean on) {
+        String base = getString(resId);
+        String suffix = on ? ": ON" : ": OFF";
+        return base + suffix;
     }
 
     private void updateStartPlayButton() {
@@ -704,7 +1036,7 @@ public class KaraokeActivity extends BaseActivity {
     // ======================== Remote Reload ========================
 
     void remoteReloadFolder() {
-        String folderPath = Hawk.get("karaoke_folder", "");
+        String folderPath = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
         if (folderPath.isEmpty() || !new File(folderPath).exists()) {
             return;
         }
@@ -751,23 +1083,67 @@ public class KaraokeActivity extends BaseActivity {
                     @Override
                     public void onChoosePath(String dir, File dirFile) {
                         String absPath = dirFile.getAbsolutePath();
-                        Hawk.put("karaoke_folder", absPath);
+                        Hawk.put(HawkConfig.KARAOKE_FOLDER, absPath);
                         loadFolder(absPath);
                     }
                 }).show();
     }
 
-    void loadFolder(String folderPath) {
+    void loadFolder(final String folderPath) {
+        if (scanCancelSignal instanceof KaraokeFileScannerImpl) {
+            scanCancelSignal.cancel();
+        }
+        scanCancelSignal = new KaraokeFileScannerImpl();
+        final KaraokeFileScanner.CancelSignal signal = scanCancelSignal;
+        final boolean recursive = Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true);
+
+        // Unified cache key + signature key, used by CacheManager + Hawk.
+        final File folder = new File(folderPath);
+        final String cacheKey;
+        try {
+            cacheKey = "karaoke_lib_" + Integer.toHexString(folder.getCanonicalPath().hashCode()) + (recursive ? "_r" : "_f");
+        } catch (Exception e) {
+            return;
+        }
+        final String sigKey = cacheKey + "_sig";
+
         new Thread(new Runnable() {
             @Override
             public void run() {
-                File folder = new File(folderPath);
-                List<KaraokeSong> songs = KaraokeFileScanner.scanFolder(folder);
+                // Quick signature pass — only File metadata, no parsing.
+                final long newSig = KaraokeFileScanner.computeSignature(folder, recursive);
+                final Long oldSig = Hawk.get(sigKey, (Long) null);
+
+                List<KaraokeSong> songs = null;
+                if (oldSig != null && oldSig == newSig) {
+                    // Cache hit — try to restore the library without rescanning.
+                    try {
+                        Object cached = com.github.tvbox.osc.cache.CacheManager.getCache(cacheKey);
+                        if (cached instanceof List) {
+                            //noinspection unchecked
+                            songs = (List<KaraokeSong>) cached;
+                        }
+                    } catch (Throwable ignore) {
+                    }
+                }
+
+                if (songs == null) {
+                    songs = KaraokeFileScanner.scanFolder(folder, recursive, signal);
+                    if (signal.isCanceled()) return;
+                    try {
+                        com.github.tvbox.osc.cache.CacheManager.save(cacheKey, songs);
+                        Hawk.put(sigKey, newSig);
+                    } catch (Throwable ignore) {
+                    }
+                }
+
+                final List<KaraokeSong> finalSongs = songs;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (signal.isCanceled()) return;
                         // Changing folder resets everything, even when empty
-                        session.setLibrary(songs);
+                        session.setLibrary(finalSongs);
                         session.clearQueue();
                         currentPlayingSong = null;
                         lastPlaybackPosition = 0;
@@ -775,16 +1151,30 @@ public class KaraokeActivity extends BaseActivity {
                         activeArtist = null;
                         activeSearch = "";
 
-                        if (songs.isEmpty()) {
+                        if (finalSongs.isEmpty()) {
                             artistAdapter.setNewData(new ArrayList<String>());
                             artistAdapter.setSelectedPosition(0);
-                            songGridAdapter.setNewData(new ArrayList<KaraokeSong>());
-                            switchTab(false);
+                            songGridAdapter.setNewDiffData(new ArrayList<KaraokeSong>());
+                            switchTab(Tab.ALL);
                             updateQueueTabCount();
                             updateStartPlayButton();
                             updateNowPlayingText();
                             Toast.makeText(mContext, getString(R.string.karaoke_no_videos), Toast.LENGTH_SHORT).show();
                             return;
+                        }
+
+                        // Hydrate library with persisted favorite / playback-position info so the
+                        // grid and queue views show heart badges and resume suggestions correctly.
+                        for (KaraokeSong s : finalSongs) {
+                            try {
+                                com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(s.filePath);
+                                if (h != null) {
+                                    s.duration = h.duration;
+                                    s.playbackPosition = h.playbackPosition;
+                                }
+                                s.favorite = RoomDataManger.isKaraokeFavorite(s.filePath);
+                            } catch (Throwable ignore) {
+                            }
                         }
 
                         // Setup artist sidebar
@@ -795,11 +1185,11 @@ public class KaraokeActivity extends BaseActivity {
                         artistAdapter.setSelectedPosition(0);
 
                         // Setup song grid
-                        songGridAdapter.setNewData(songs);
+                        songGridAdapter.setNewDiffData(finalSongs);
                         songGridAdapter.updateQueuedSet(session.getQueue());
 
                         // Reset to all songs tab
-                        switchTab(false);
+                        switchTab(Tab.ALL);
                         tvTabAll.requestFocus();
                         updateQueueTabCount();
                         updateStartPlayButton();
@@ -810,16 +1200,31 @@ public class KaraokeActivity extends BaseActivity {
         }).start();
     }
 
+    /** Concrete CancelSignal implementation so loadFolder can cancel an in-flight scan. */
+    private static class KaraokeFileScannerImpl implements KaraokeFileScanner.CancelSignal {
+        private volatile boolean cancelled = false;
+
+        @Override
+        public boolean isCanceled() {
+            return cancelled;
+        }
+
+        public void cancel() {
+            cancelled = true;
+        }
+    }
+
     // ======================== Audio Track Switching ========================
 
     private void switchAudioTrack() {
         AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
-        if (!(mediaPlayer instanceof IjkmPlayer)) {
+        if (!(mediaPlayer instanceof TrackAwarePlayer)) {
             Toast.makeText(mContext, getString(R.string.karaoke_ijk_only), Toast.LENGTH_SHORT).show();
             return;
         }
-        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
-        TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+        final TrackAwarePlayer trackPlayer = (TrackAwarePlayer) mediaPlayer;
+        final AbstractPlayer absPlayer = mediaPlayer;
+        TrackInfo trackInfo = trackPlayer.getTrackInfo();
         if (trackInfo == null) {
             Toast.makeText(mContext, getString(R.string.karaoke_no_audio_track), Toast.LENGTH_SHORT).show();
             return;
@@ -841,22 +1246,25 @@ public class KaraokeActivity extends BaseActivity {
         dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<TrackInfoBean>() {
             @Override
             public void click(TrackInfoBean value, int pos) {
-                savedAudioTrackIndex = pos;
+                savedAudioTrackId = value.trackId;
                 try {
                     for (TrackInfoBean audio : audioTracks) {
                         audio.selected = audio.trackId == value.trackId;
                     }
-                    ijkPlayer.pause();
-                    long progress = ijkPlayer.getCurrentPosition();
-                    ijkPlayer.setTrack(value.trackId);
+                    absPlayer.pause();
+                    final long progress = absPlayer.getCurrentPosition();
+                    trackPlayer.setTrack(value.trackId);
                     mController.setTrackInfo(value.name);
-                    new Handler().postDelayed(new Runnable() {
+                    if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
+                    pendingAudioSwitch = new Runnable() {
                         @Override
                         public void run() {
-                            ijkPlayer.seekTo(progress);
-                            ijkPlayer.start();
+                            pendingAudioSwitch = null;
+                            absPlayer.seekTo(progress);
+                            absPlayer.start();
                         }
-                    }, 800);
+                    };
+                    mainHandler.postDelayed(pendingAudioSwitch, 800);
                     dialog.dismiss();
                 } catch (Exception e) {
                     e.printStackTrace();
@@ -898,6 +1306,23 @@ public class KaraokeActivity extends BaseActivity {
             }
         } else if (currentMode == Mode.SELECT
                 && event.getAction() == KeyEvent.ACTION_DOWN
+                && etSearch != null && etSearch.hasFocus()) {
+            // EditText swallows D-pad arrows for cursor movement once it has focus, so the
+            // nextFocusLeft/Right attributes on etSearch never fire and the user is stuck
+            // (must press BACK to escape). Intercept here and route focus explicitly.
+            int direction = keyCodeToFocusDirection(event.getKeyCode());
+            if (direction != 0) {
+                View next = etSearch.focusSearch(direction);
+                if (next != null && next != etSearch && next.isFocusable()) {
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    imm.hideSoftInputFromWindow(etSearch.getWindowToken(), 0);
+                    etSearch.clearFocus();
+                    next.requestFocus();
+                    return true;
+                }
+            }
+        } else if (currentMode == Mode.SELECT
+                && event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getKeyCode() == KeyEvent.KEYCODE_DPAD_DOWN
                 && currentPlayingSong == null) {
             // Bottom controls are hidden — prevent focus escaping to geometric fallback,
@@ -908,6 +1333,16 @@ public class KaraokeActivity extends BaseActivity {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    private static int keyCodeToFocusDirection(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT: return View.FOCUS_LEFT;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: return View.FOCUS_RIGHT;
+            case KeyEvent.KEYCODE_DPAD_UP: return View.FOCUS_UP;
+            case KeyEvent.KEYCODE_DPAD_DOWN: return View.FOCUS_DOWN;
+            default: return 0;
+        }
     }
 
     /**
@@ -929,7 +1364,11 @@ public class KaraokeActivity extends BaseActivity {
             // RV is empty: nothing to navigate within, so swallow to keep focus put
             return true;
         }
-        int pos = rv.getChildAdapterPosition(focused);
+        // focused may be a grandchild (itemMain / ivFavorite / ivDelete) — resolve to the
+        // direct RV child so getChildAdapterPosition returns a real position, not NO_POSITION.
+        View directChild = rv.getFocusedChild();
+        if (directChild == null) return false;
+        int pos = rv.getChildAdapterPosition(directChild);
         // pos == -1 happens when the focused view is no longer attached; treat as bottom
         if (pos == -1) return true;
 
@@ -974,7 +1413,7 @@ public class KaraokeActivity extends BaseActivity {
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_INFO) {
-            if (showingQueue) {
+            if (activeTab == Tab.QUEUE) {
                 // In queue tab: delete focused item
                 View focused = rvQueue.getFocusedChild();
                 if (focused != null) {
@@ -985,7 +1424,7 @@ public class KaraokeActivity extends BaseActivity {
                     }
                 }
             }
-            switchTab(true);
+            switchTab(Tab.QUEUE);
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_SEARCH) {
@@ -1002,6 +1441,7 @@ public class KaraokeActivity extends BaseActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        setScreenOn();
         if (mVideoView != null && currentMode == Mode.PLAY && !userPaused) {
             mVideoView.resume();
         }
@@ -1010,15 +1450,25 @@ public class KaraokeActivity extends BaseActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        setScreenOff();
         if (mVideoView != null && currentMode == Mode.PLAY) {
             mVideoView.pause();
             lastPlaybackPosition = mVideoView.getCurrentPosition();
+            persistCurrentPlaybackPosition();
         }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (scanCancelSignal instanceof KaraokeFileScannerImpl) {
+            ((KaraokeFileScannerImpl) scanCancelSignal).cancel();
+        }
+        if (lyricLoader != null) lyricLoader.cancelAll();
+        if (pendingErrorPlay != null) mainHandler.removeCallbacks(pendingErrorPlay);
+        if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
+        mainHandler.removeCallbacksAndMessages(null);
+        if (mController != null) mController.release();
         KaraokeRemoteManager.get().detach();
         if (mVideoView != null) mVideoView.release();
         if (session != null) session.reset();
@@ -1145,8 +1595,8 @@ public class KaraokeActivity extends BaseActivity {
                     session.addToQueue(song);
                     updateQueueTabCount();
                     updateStartPlayButton();
-                    if (showingQueue) {
-                        queueAdapter.setNewData(session.getQueue());
+                    if (activeTab == Tab.QUEUE) {
+                        queueAdapter.setNewDiffData(session.getQueue());
                         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
                         updateFocusGraph();
                     } else {
@@ -1179,9 +1629,9 @@ public class KaraokeActivity extends BaseActivity {
         List<Map<String, Object>> result = new ArrayList<>();
         if (mVideoView == null) return result;
         AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
-        if (!(mediaPlayer instanceof IjkmPlayer)) return result;
-        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
-        TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+        if (!(mediaPlayer instanceof TrackAwarePlayer)) return result;
+        TrackAwarePlayer trackPlayer = (TrackAwarePlayer) mediaPlayer;
+        TrackInfo trackInfo = trackPlayer.getTrackInfo();
         if (trackInfo == null) return result;
         for (TrackInfoBean bean : trackInfo.getAudio()) {
             Map<String, Object> item = new HashMap<>();
@@ -1196,28 +1646,36 @@ public class KaraokeActivity extends BaseActivity {
     boolean remoteSwitchAudioTrack(int trackId) {
         if (mVideoView == null || isFinishing()) return false;
         AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
-        if (!(mediaPlayer instanceof IjkmPlayer)) return false;
-        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
+        if (!(mediaPlayer instanceof TrackAwarePlayer)) return false;
+        final TrackAwarePlayer trackPlayer = (TrackAwarePlayer) mediaPlayer;
+        final AbstractPlayer absPlayer = mediaPlayer;
         try {
-            TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+            TrackInfo trackInfo = trackPlayer.getTrackInfo();
             if (trackInfo != null) {
                 List<TrackInfoBean> audioTracks = trackInfo.getAudio();
-                for (int i = 0; i < audioTracks.size(); i++) {
-                    if (audioTracks.get(i).trackId == trackId) {
-                        savedAudioTrackIndex = i;
-                        break;
+                boolean found = false;
+                for (TrackInfoBean b : audioTracks) {
+                    if (b.trackId == trackId) found = true;
+                    b.selected = b.trackId == trackId;
+                }
+                if (!found) return false;
+            }
+            savedAudioTrackId = trackId;
+            absPlayer.pause();
+            final long progress = absPlayer.getCurrentPosition();
+            trackPlayer.setTrack(trackId);
+            if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
+            pendingAudioSwitch = new Runnable() {
+                @Override
+                public void run() {
+                    pendingAudioSwitch = null;
+                    if (!isFinishing() && !isDestroyed()) {
+                        absPlayer.seekTo(progress);
+                        absPlayer.start();
                     }
                 }
-            }
-            ijkPlayer.pause();
-            long progress = ijkPlayer.getCurrentPosition();
-            ijkPlayer.setTrack(trackId);
-            new Handler().postDelayed(() -> {
-                if (!isFinishing() && !isDestroyed()) {
-                    ijkPlayer.seekTo(progress);
-                    ijkPlayer.start();
-                }
-            }, 800);
+            };
+            mainHandler.postDelayed(pendingAudioSwitch, 800);
             return true;
         } catch (Exception e) {
             return false;
@@ -1227,17 +1685,23 @@ public class KaraokeActivity extends BaseActivity {
     private boolean applySavedAudioTrack() {
         if (mVideoView == null) return false;
         AbstractPlayer mediaPlayer = mVideoView.getMediaPlayer();
-        if (!(mediaPlayer instanceof IjkmPlayer)) return false;
-        IjkmPlayer ijkPlayer = (IjkmPlayer) mediaPlayer;
-        TrackInfo trackInfo = ijkPlayer.getTrackInfo();
+        if (!(mediaPlayer instanceof TrackAwarePlayer)) return false;
+        TrackAwarePlayer trackPlayer = (TrackAwarePlayer) mediaPlayer;
+        TrackInfo trackInfo = trackPlayer.getTrackInfo();
         if (trackInfo == null) return false;
         List<TrackInfoBean> audioTracks = trackInfo.getAudio();
         if (audioTracks.isEmpty()) return false;
-        int idx = Math.min(savedAudioTrackIndex, audioTracks.size() - 1);
-        if (idx <= 0) return true;
-        TrackInfoBean target = audioTracks.get(idx);
+        if (savedAudioTrackId <= 0) return true;
+        TrackInfoBean target = null;
+        for (TrackInfoBean b : audioTracks) {
+            if (b.trackId == savedAudioTrackId) {
+                target = b;
+                break;
+            }
+        }
+        if (target == null) return false;
         try {
-            ijkPlayer.setTrack(target.trackId);
+            trackPlayer.setTrack(target.trackId);
             mController.setTrackInfo(target.name);
             return true;
         } catch (Exception e) {

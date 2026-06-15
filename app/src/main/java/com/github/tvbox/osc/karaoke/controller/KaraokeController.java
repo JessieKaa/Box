@@ -2,6 +2,7 @@ package com.github.tvbox.osc.karaoke.controller;
 
 import android.content.Context;
 import android.os.Handler;
+import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.widget.ImageView;
@@ -63,10 +64,16 @@ public class KaraokeController extends BaseVideoController {
     private boolean wasPlayingBeforeSeek = false;
 
     private KaraokeControllerCallback callback;
-    private final Handler hideHandler = new Handler();
-    private final Handler seekOverlayHandler = new Handler();
+    private final Handler hideHandler = new Handler(Looper.getMainLooper());
+    private final Handler seekOverlayHandler = new Handler(Looper.getMainLooper());
     private static final int AUTO_HIDE_DELAY = 5000;
     private boolean isPlaying = false;
+
+    /** Cancel any pending hide/overlay callbacks. Call from Activity.onDestroy to prevent leaks. */
+    public void release() {
+        hideHandler.removeCallbacksAndMessages(null);
+        seekOverlayHandler.removeCallbacksAndMessages(null);
+    }
 
     private final Runnable autoHideRunnable = new Runnable() {
         @Override
@@ -216,6 +223,11 @@ public class KaraokeController extends BaseVideoController {
 
     public void setCallback(KaraokeControllerCallback callback) {
         this.callback = callback;
+    }
+
+    /** Returns the karaoke lyric view embedded in this controller, or null if not present. */
+    public com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView getLyricView() {
+        return findViewById(R.id.karaokeSubtitleView);
     }
 
     public void setSongTitle(String title) {

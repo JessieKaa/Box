@@ -73,6 +73,11 @@ public class HawkConfig {
     public static final String LIVE_SKIP_PASSWORD = "live_skip_password";
     public static final String LIVE_PLAYER_TYPE = "live_player_type"; // 0 系统 1 ijk 2 exo
 
+    // Karaoke Settings
+    public static final String KARAOKE_FOLDER = "karaoke_folder";
+    public static final String KARAOKE_SCAN_RECURSIVE = "karaoke_scan_recursive"; // default true
+    public static final String KARAOKE_LYRIC_ENABLED = "karaoke_lyric_enabled";   // default true
+
     public static boolean isDebug() {
         return Hawk.get(DEBUG_OPEN, false);
     }

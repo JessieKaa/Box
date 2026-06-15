@@ -6,6 +6,7 @@ import android.util.Log;
 
 import com.github.tvbox.osc.subtitle.exception.FatalParsingException;
 import com.github.tvbox.osc.subtitle.format.FormatASS;
+import com.github.tvbox.osc.subtitle.format.FormatLRC;
 import com.github.tvbox.osc.subtitle.format.FormatSRT;
 import com.github.tvbox.osc.subtitle.format.FormatSTL;
 import com.github.tvbox.osc.subtitle.format.TimedTextFileFormat;
@@ -35,8 +36,15 @@ import okhttp3.Response;
 public class SubtitleLoader {
     private static final String TAG = SubtitleLoader.class.getSimpleName();
 
-    private SubtitleLoader() {
-        throw new AssertionError("No instance for you.");
+    SubtitleLoader() {
+        // package-private; allows the karaoke lyric loader to reuse the non-static
+        // loadSubtitle(path) API below.
+    }
+
+    /** @deprecated use {@link #loadSubtitle(String)} static API. */
+    @Deprecated
+    public static SubtitleLoader getInstance() {
+        return new SubtitleLoader();
     }
 
     public static void loadSubtitle(final String path, final Callback callback) {
@@ -228,8 +236,10 @@ public class SubtitleLoader {
             return new FormatSTL().parseFile(fileName, newInputStream);
         } else if (".ttml".equalsIgnoreCase(ext)) {
             return new FormatSTL().parseFile(fileName, newInputStream);
+        } else if (".lrc".equalsIgnoreCase(ext)) {
+            return new FormatLRC().parseFile(fileName, newInputStream);
         }
-        TimedTextFileFormat[] arr = {new FormatSRT(), new FormatASS(), new FormatSTL(), new FormatSTL()};
+        TimedTextFileFormat[] arr = {new FormatSRT(), new FormatASS(), new FormatSTL(), new FormatSTL(), new FormatLRC()};
         for(TimedTextFileFormat oneFormat : arr) {
             try {
                 TimedTextObject obj = oneFormat.parseFile(fileName, newInputStream);

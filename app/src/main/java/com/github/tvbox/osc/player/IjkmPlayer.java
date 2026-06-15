@@ -27,7 +27,7 @@ import tv.danmaku.ijk.media.player.misc.IjkTrackInfo;
 import xyz.doikki.videoplayer.ijk.IjkPlayer;
 import xyz.doikki.videoplayer.ijk.RawDataSourceProvider;
 
-public class IjkmPlayer extends IjkPlayer {
+public class IjkmPlayer extends IjkPlayer implements TrackAwarePlayer {
 
     private IJKCode codec = null;
 

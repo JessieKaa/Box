@@ -39,6 +39,7 @@ public class KaraokeSession {
 
     private List<KaraokeSong> library = new ArrayList<>();
     private List<KaraokeSong> queue = new ArrayList<>();
+    private List<KaraokeSong> favorites = new ArrayList<>();
     private int currentQueueIndex = -1;
 
     public void setLibrary(List<KaraokeSong> songs) {
@@ -47,6 +48,14 @@ public class KaraokeSession {
 
     public List<KaraokeSong> getLibrary() {
         return library;
+    }
+
+    public void setFavorites(List<KaraokeSong> songs) {
+        favorites = songs != null ? new ArrayList<>(songs) : new ArrayList<>();
+    }
+
+    public List<KaraokeSong> getFavorites() {
+        return favorites;
     }
 
     public List<String> getArtists() {
@@ -91,7 +100,7 @@ public class KaraokeSession {
     }
 
     public List<KaraokeSong> getQueue() {
-        return queue;
+        return new ArrayList<>(queue);
     }
 
     public boolean isInQueue(KaraokeSong song) {

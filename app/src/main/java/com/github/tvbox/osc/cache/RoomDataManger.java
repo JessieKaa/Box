@@ -181,4 +181,99 @@ public class RoomDataManger {
     public static void deleteDrive(int id) {
         AppDataManager.get().getStorageDriveDao().delete(id);
     }
+
+    // ======================== Karaoke: history & favorites ========================
+
+    public static void insertKaraokeHistory(com.github.tvbox.osc.karaoke.bean.KaraokeSong song, long playbackPosition) {
+        try {
+            KaraokeHistory existing = AppDataManager.get().getKaraokeHistoryDao().getByPath(song.filePath);
+            KaraokeHistory record = existing != null ? existing : new KaraokeHistory();
+            record.filePath = song.filePath;
+            record.title = song.title;
+            record.artist = song.artist;
+            record.displayName = song.displayName;
+            record.fileSize = song.fileSize;
+            record.lastModified = song.lastModified;
+            record.duration = song.duration;
+            record.playedAt = System.currentTimeMillis();
+            record.playbackPosition = playbackPosition;
+            AppDataManager.get().getKaraokeHistoryDao().insert(record);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void updateKaraokePlaybackPosition(String filePath, long playbackPosition) {
+        try {
+            KaraokeHistory record = AppDataManager.get().getKaraokeHistoryDao().getByPath(filePath);
+            if (record != null) {
+                record.playbackPosition = playbackPosition;
+                record.playedAt = System.currentTimeMillis();
+                AppDataManager.get().getKaraokeHistoryDao().insert(record);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static KaraokeHistory getKaraokeHistory(String filePath) {
+        try {
+            return AppDataManager.get().getKaraokeHistoryDao().getByPath(filePath);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public static List<KaraokeHistory> getKaraokeHistory(int limit) {
+        try {
+            return AppDataManager.get().getKaraokeHistoryDao().getAll(limit);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new ArrayList<>();
+        }
+    }
+
+    public static boolean isKaraokeFavorite(String filePath) {
+        try {
+            return AppDataManager.get().getKaraokeFavoriteDao().getByPath(filePath) != null;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    public static List<KaraokeFavorite> getKaraokeFavorites() {
+        try {
+            return AppDataManager.get().getKaraokeFavoriteDao().getAll();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new ArrayList<>();
+        }
+    }
+
+    /** Returns true if the song is now a favorite, false if it was removed. */
+    public static boolean toggleKaraokeFavorite(com.github.tvbox.osc.karaoke.bean.KaraokeSong song) {
+        try {
+            KaraokeFavoriteDao dao = AppDataManager.get().getKaraokeFavoriteDao();
+            if (dao.getByPath(song.filePath) != null) {
+                dao.removeByPath(song.filePath);
+                return false;
+            }
+            KaraokeFavorite record = new KaraokeFavorite();
+            record.filePath = song.filePath;
+            record.title = song.title;
+            record.artist = song.artist;
+            record.displayName = song.displayName;
+            record.fileSize = song.fileSize;
+            record.lastModified = song.lastModified;
+            record.duration = song.duration;
+            record.favoritedAt = System.currentTimeMillis();
+            dao.insert(record);
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return song != null && isKaraokeFavorite(song.filePath);
+        }
+    }
 }
