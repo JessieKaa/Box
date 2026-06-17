@@ -268,7 +268,10 @@ public class KaraokeRequestProcess implements RequestProcess {
         int dot = fileName.lastIndexOf('.');
         if (dot < 0 || dot >= fileName.length() - 1) return false;
         String ext = fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
-        return StorageDriveType.isVideoType(ext);
+        // Karaoke upload endpoint accepts both video containers and karaoke audio
+        // containers (MKA / FLAC / etc.). The stricter video-only filter is reserved
+        // for the Drive browser (DriveActivity / DriveAdapter).
+        return StorageDriveType.isVideoType(ext) || StorageDriveType.isKaraokeAudioType(ext);
     }
 
     private NanoHTTPD.Response respondFiles() {

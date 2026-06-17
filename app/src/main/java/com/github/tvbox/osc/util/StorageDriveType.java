@@ -31,6 +31,24 @@ public class StorageDriveType {
         return false;
     }
 
+    /**
+     * Karaoke-only audio container detection (MKA, FLAC, APE, WAV, MP3, M4A, OGG, AAC).
+     * Kept separate from {@link #isVideoType(String)} so the Drive browser and other
+     * video-only paths don't start treating audio files as videos.
+     */
+    public static boolean isKaraokeAudioType(String type) {
+        if (type == null || type.length() == 0) return false;
+        type = type.toUpperCase(Locale.ROOT).trim();
+        for (String audioType : karaokeAudioTypes) {
+            if (audioType.equals(type)) return true;
+        }
+        return false;
+    }
+
+    private static final String[] karaokeAudioTypes = new String[] {
+            "MKA", "FLAC", "APE", "WAV", "MP3", "M4A", "OGG", "AAC"
+    };
+
     private static final String[] videoTypes = new String[] {
             "264",
             "264",

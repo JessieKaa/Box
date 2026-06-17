@@ -181,4 +181,27 @@ public class IjkmPlayer extends IjkPlayer implements TrackAwarePlayer {
         mMediaPlayer.setOnTimedTextListener(listener);
     }
 
+    /**
+     * Returns the index of the first subtitle-class track reported by IJK (either
+     * {@code MEDIA_TRACK_TYPE_TIMEDTEXT} or {@code MEDIA_TRACK_TYPE_SUBTITLE}), or
+     * {@code null} when none exists.
+     *
+     * Used by the karaoke audio-only path to enable embedded lyrics without depending
+     * on {@link #getTrackInfo()}, whose filter set is shared with {@code PlayActivity}
+     * and {@code PlayFragment} for VOD subtitle auto-selection. Bypassing it keeps the
+     * existing VOD behavior intact.
+     */
+    public Integer getFirstEmbeddedSubtitleTrackIndex() {
+        IjkTrackInfo[] tracks = mMediaPlayer.getTrackInfo();
+        if (tracks == null) return null;
+        for (int i = 0; i < tracks.length; i++) {
+            int type = tracks[i].getTrackType();
+            if (type == ITrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT
+                    || type == ITrackInfo.MEDIA_TRACK_TYPE_SUBTITLE) {
+                return i;
+            }
+        }
+        return null;
+    }
+
 }

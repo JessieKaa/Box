@@ -29,6 +29,7 @@ import com.google.gson.JsonObject;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -143,6 +144,34 @@ public class ImgUtil {
                 .apply(requestOptions)
                 .into(view);
         }
+    }
+
+    /**
+     * Local-source overload for the karaoke background carousel. Accepts:
+     *  - {@link File}: local image file
+     *  - {@code byte[]}: embedded cover art bytes
+     *  - {@link Integer}: drawable resource id
+     *  - {@link String}: local file path (no URL processing)
+     * Bypasses the URL/header machinery used by the network overload.
+     */
+    public static void load(Object source, ImageView view) {
+        if (source == null) {
+            view.setImageResource(R.drawable.img_loading_placeholder);
+            return;
+        }
+        view.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        RequestOptions requestOptions = new RequestOptions()
+                .format(DecodeFormat.PREFER_RGB_565)
+                .diskCacheStrategy(DiskCacheStrategy.NONE)
+                .dontAnimate()
+                .centerCrop();
+        Glide.with(App.getInstance())
+                .asBitmap()
+                .load(source)
+                .error(R.drawable.img_loading_placeholder)
+                .placeholder(R.drawable.img_loading_placeholder)
+                .apply(requestOptions)
+                .into(view);
     }
 
     /*

@@ -4,6 +4,15 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
+    <!-- Background carousel for audio-only playback. Drawn BELOW mVideoView (earlier
+         document order = lower z). When the player surface is GONE (audio mode), this
+         shows through. Toggled by KaraokeActivity.applyAudioOnlyUi. -->
+    <com.github.tvbox.osc.karaoke.widget.KaraokeBgCarouselView
+        android:id="@+id/bgCarouselView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
     <com.github.tvbox.osc.player.MyVideoView
         android:id="@+id/mVideoView"
         android:layout_width="match_parent"

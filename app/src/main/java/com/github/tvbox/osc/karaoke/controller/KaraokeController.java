@@ -14,6 +14,8 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 
 import com.github.tvbox.osc.R;
+import com.github.tvbox.osc.karaoke.lyric.KaraokeFullLyricView;
+import com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView;
 
 import java.util.List;
 
@@ -37,6 +39,8 @@ public class KaraokeController extends BaseVideoController {
     private TextView tvTrackInfo;
     private ImageView ivPlayPause;
     private ProgressBar pbLoading;
+    private KaraokeFullLyricView fullLyricView;
+    private SimpleSubtitleView simpleLyricView;
 
     // Seek bar
     private SeekBar seekBar;
@@ -66,14 +70,28 @@ public class KaraokeController extends BaseVideoController {
     private KaraokeControllerCallback callback;
     private final Handler hideHandler = new Handler(Looper.getMainLooper());
     private final Handler seekOverlayHandler = new Handler(Looper.getMainLooper());
+    private final Handler lyricPollHandler = new Handler(Looper.getMainLooper());
     private static final int AUTO_HIDE_DELAY = 5000;
+    private static final long LYRIC_POLL_INTERVAL_MS = 200L;
     private boolean isPlaying = false;
+    private boolean audioOnlyMode = false;
 
     /** Cancel any pending hide/overlay callbacks. Call from Activity.onDestroy to prevent leaks. */
     public void release() {
         hideHandler.removeCallbacksAndMessages(null);
         seekOverlayHandler.removeCallbacksAndMessages(null);
+        lyricPollHandler.removeCallbacksAndMessages(null);
     }
+
+    private final Runnable lyricPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (fullLyricView != null && mControlWrapper != null && fullLyricView.getMode() == KaraokeFullLyricView.MODE_SCROLL) {
+                fullLyricView.setCurrentPositionMs(mControlWrapper.getCurrentPosition());
+            }
+            lyricPollHandler.postDelayed(this, LYRIC_POLL_INTERVAL_MS);
+        }
+    };
 
     private final Runnable autoHideRunnable = new Runnable() {
         @Override
@@ -107,6 +125,8 @@ public class KaraokeController extends BaseVideoController {
         tvTrackInfo = findViewById(R.id.tvTrackInfo);
         ivPlayPause = findViewById(R.id.ivPlayPause);
         pbLoading = findViewById(R.id.pbLoading);
+        fullLyricView = findViewById(R.id.karaokeFullLyricView);
+        simpleLyricView = findViewById(R.id.karaokeSubtitleView);
 
         seekBar = findViewById(R.id.seekBar);
         tvCurrentTime = findViewById(R.id.tvCurrentTime);
@@ -184,18 +204,21 @@ public class KaraokeController extends BaseVideoController {
                 stopProgress();
                 cancelSeekState();
                 resetProgressUI();
+                stopLyricPoll();
                 break;
             case VideoView.STATE_PLAYING:
                 isPlaying = true;
                 ivPlayPause.setImageResource(R.drawable.v_pause);
                 pbLoading.setVisibility(GONE);
                 startProgress();
+                if (audioOnlyMode) startLyricPoll();
                 break;
             case VideoView.STATE_PAUSED:
                 isPlaying = false;
                 ivPlayPause.setImageResource(R.drawable.v_play);
                 pbLoading.setVisibility(GONE);
                 stopProgress();
+                stopLyricPoll();
                 break;
             case VideoView.STATE_PREPARING:
             case VideoView.STATE_BUFFERING:
@@ -217,6 +240,7 @@ public class KaraokeController extends BaseVideoController {
                 ivPlayPause.setImageResource(R.drawable.v_play);
                 stopProgress();
                 cancelSeekState();
+                stopLyricPoll();
                 break;
         }
     }
@@ -228,6 +252,47 @@ public class KaraokeController extends BaseVideoController {
     /** Returns the karaoke lyric view embedded in this controller, or null if not present. */
     public com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView getLyricView() {
         return findViewById(R.id.karaokeSubtitleView);
+    }
+
+    /** Returns the full-screen scrolling lyric view (audio-only mode), or null if not present. */
+    public KaraokeFullLyricView getFullLyricView() {
+        return fullLyricView;
+    }
+
+    /**
+     * Switch the controller between audio-only and video modes. In audio-only mode the
+     * legacy single-line {@link SimpleSubtitleView} is hidden (the full-screen view takes
+     * over); in video mode the full-screen view is hidden and the simple view is left for
+     * the activity to drive as before. Also starts/stops the lyric position poller.
+     */
+    public void setAudioOnlyMode(boolean audioOnly) {
+        this.audioOnlyMode = audioOnly;
+        if (audioOnly) {
+            if (simpleLyricView != null) simpleLyricView.setVisibility(GONE);
+            // fullLyricView visibility is the activity's responsibility — it must first
+            // push a TimedTextObject / live text in, then make it VISIBLE.
+        } else {
+            if (fullLyricView != null) {
+                fullLyricView.reset();
+                fullLyricView.setVisibility(GONE);
+            }
+            stopLyricPoll();
+        }
+    }
+
+    public boolean isAudioOnlyMode() {
+        return audioOnlyMode;
+    }
+
+    /** Begin periodic position → lyric-row updates. Only forwards in SCROLL mode. */
+    public void startLyricPoll() {
+        lyricPollHandler.removeCallbacks(lyricPollRunnable);
+        lyricPollHandler.postDelayed(lyricPollRunnable, LYRIC_POLL_INTERVAL_MS);
+    }
+
+    /** Stop the position poller. Safe to call when not running. */
+    public void stopLyricPoll() {
+        lyricPollHandler.removeCallbacks(lyricPollRunnable);
     }
 
     public void setSongTitle(String title) {
