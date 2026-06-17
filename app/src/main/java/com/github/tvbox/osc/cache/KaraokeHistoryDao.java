@@ -18,6 +18,9 @@ public interface KaraokeHistoryDao {
     @Query("SELECT * FROM karaokeHistory WHERE filePath = :filePath LIMIT 1")
     KaraokeHistory getByPath(String filePath);
 
+    @Query("SELECT * FROM karaokeHistory WHERE identityKey = :key LIMIT 1")
+    KaraokeHistory getByIdentityKey(String key);
+
     @Query("DELETE FROM karaokeHistory WHERE filePath = :filePath")
     int deleteByPath(String filePath);
 

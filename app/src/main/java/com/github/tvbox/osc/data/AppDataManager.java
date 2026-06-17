@@ -22,7 +22,7 @@ import java.io.IOException;
  * @since 2020/5/15
  */
 public class AppDataManager {
-    private static final int DB_FILE_VERSION = 4;
+    private static final int DB_FILE_VERSION = 5;
     private static final String DB_NAME = "tvbox";
     private static volatile AppDataManager manager;
     private static AppDataBase dbInstance;
@@ -98,6 +98,32 @@ public class AppDataManager {
         }
     };
 
+    static final Migration MIGRATION_4_5 = new Migration(4, 5) {
+        @Override
+        public void migrate(SupportSQLiteDatabase database) {
+            database.execSQL("ALTER TABLE karaokeHistory ADD COLUMN identityKey TEXT");
+            database.execSQL("ALTER TABLE karaokeHistory ADD COLUMN trackId TEXT");
+            database.execSQL("ALTER TABLE karaokeHistory ADD COLUMN sourceType TEXT");
+            database.execSQL("ALTER TABLE karaokeHistory ADD COLUMN streamUrl TEXT");
+            database.execSQL("ALTER TABLE karaokeHistory ADD COLUMN artworkUrl TEXT");
+            database.execSQL("ALTER TABLE karaokeFavorite ADD COLUMN identityKey TEXT");
+            database.execSQL("ALTER TABLE karaokeFavorite ADD COLUMN trackId TEXT");
+            database.execSQL("ALTER TABLE karaokeFavorite ADD COLUMN sourceType TEXT");
+            database.execSQL("ALTER TABLE karaokeFavorite ADD COLUMN streamUrl TEXT");
+            database.execSQL("ALTER TABLE karaokeFavorite ADD COLUMN artworkUrl TEXT");
+
+            database.execSQL("DELETE FROM karaokeHistory WHERE filePath IS NULL OR filePath = ''");
+            database.execSQL("DELETE FROM karaokeFavorite WHERE filePath IS NULL OR filePath = ''");
+            database.execSQL("UPDATE karaokeHistory SET sourceType='local', identityKey='local:' || filePath WHERE identityKey IS NULL");
+            database.execSQL("UPDATE karaokeFavorite SET sourceType='local', identityKey='local:' || filePath WHERE identityKey IS NULL");
+
+            database.execSQL("DROP INDEX IF EXISTS index_karaokeHistory_filePath");
+            database.execSQL("DROP INDEX IF EXISTS index_karaokeFavorite_filePath");
+            database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_karaokeHistory_identityKey ON karaokeHistory(identityKey)");
+            database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_karaokeFavorite_identityKey ON karaokeFavorite(identityKey)");
+        }
+    };
+
     static String dbPath() {
         return DB_NAME + ".v" + DB_FILE_VERSION + ".db";
     }
@@ -132,6 +158,7 @@ public class AppDataManager {
                     .addMigrations(MIGRATION_1_2)
                     .addMigrations(MIGRATION_2_3)
                     .addMigrations(MIGRATION_3_4)
+                    .addMigrations(MIGRATION_4_5)
                     .addCallback(new RoomDatabase.Callback() {
                         @Override
                         public void onCreate(@NonNull SupportSQLiteDatabase db) {

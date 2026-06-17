@@ -22,11 +22,6 @@ import com.orhanobut.hawk.Hawk;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * @author pj567
- * @date :2021/1/7
- * @description:
- */
 public class RoomDataManger {
     static ExclusionStrategy vodInfoStrategy = new ExclusionStrategy() {
         @Override
@@ -86,11 +81,7 @@ public class RoomDataManger {
     }
 
     public static List<VodInfo> getAllVodRecord(int limit) {
-        // 历史记录超过60条时, 删除最旧的数据 只保留50条.
         int count = AppDataManager.get().getVodRecordDao().getCount();
-        //if ( count > 60 ) {
-        //    AppDataManager.get().getVodRecordDao().reserver(50);
-        //}
         Integer index = Hawk.get(HawkConfig.HOME_NUM, 0);
         Integer hisNum = HistoryHelper.getHisNum(index);
         if ( count > hisNum ) {
@@ -186,9 +177,14 @@ public class RoomDataManger {
 
     public static void insertKaraokeHistory(com.github.tvbox.osc.karaoke.bean.KaraokeSong song, long playbackPosition) {
         try {
-            KaraokeHistory existing = AppDataManager.get().getKaraokeHistoryDao().getByPath(song.filePath);
+            KaraokeHistory existing = AppDataManager.get().getKaraokeHistoryDao().getByIdentityKey(song.identityKey());
             KaraokeHistory record = existing != null ? existing : new KaraokeHistory();
+            record.identityKey = song.identityKey();
             record.filePath = song.filePath;
+            record.trackId = song.trackId;
+            record.sourceType = song.sourceType;
+            record.streamUrl = song.streamUrl;
+            record.artworkUrl = song.artworkUrl;
             record.title = song.title;
             record.artist = song.artist;
             record.displayName = song.displayName;
@@ -205,7 +201,17 @@ public class RoomDataManger {
 
     public static void updateKaraokePlaybackPosition(String filePath, long playbackPosition) {
         try {
-            KaraokeHistory record = AppDataManager.get().getKaraokeHistoryDao().getByPath(filePath);
+            com.github.tvbox.osc.karaoke.bean.KaraokeSong stub = new com.github.tvbox.osc.karaoke.bean.KaraokeSong();
+            stub.filePath = filePath;
+            updateKaraokePlaybackPosition(stub, playbackPosition);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void updateKaraokePlaybackPosition(com.github.tvbox.osc.karaoke.bean.KaraokeSong song, long playbackPosition) {
+        try {
+            KaraokeHistory record = AppDataManager.get().getKaraokeHistoryDao().getByIdentityKey(song.identityKey());
             if (record != null) {
                 record.playbackPosition = playbackPosition;
                 record.playedAt = System.currentTimeMillis();
@@ -213,6 +219,15 @@ public class RoomDataManger {
             }
         } catch (Exception e) {
             e.printStackTrace();
+        }
+    }
+
+    public static KaraokeHistory getKaraokeHistory(com.github.tvbox.osc.karaoke.bean.KaraokeSong song) {
+        try {
+            return AppDataManager.get().getKaraokeHistoryDao().getByIdentityKey(song.identityKey());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
         }
     }
 
@@ -231,6 +246,15 @@ public class RoomDataManger {
         } catch (Exception e) {
             e.printStackTrace();
             return new ArrayList<>();
+        }
+    }
+
+    public static boolean isKaraokeFavorite(com.github.tvbox.osc.karaoke.bean.KaraokeSong song) {
+        try {
+            return AppDataManager.get().getKaraokeFavoriteDao().getByIdentityKey(song.identityKey()) != null;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
         }
     }
 
@@ -256,12 +280,17 @@ public class RoomDataManger {
     public static boolean toggleKaraokeFavorite(com.github.tvbox.osc.karaoke.bean.KaraokeSong song) {
         try {
             KaraokeFavoriteDao dao = AppDataManager.get().getKaraokeFavoriteDao();
-            if (dao.getByPath(song.filePath) != null) {
-                dao.removeByPath(song.filePath);
+            if (dao.getByIdentityKey(song.identityKey()) != null) {
+                dao.removeByIdentityKey(song.identityKey());
                 return false;
             }
             KaraokeFavorite record = new KaraokeFavorite();
+            record.identityKey = song.identityKey();
             record.filePath = song.filePath;
+            record.trackId = song.trackId;
+            record.sourceType = song.sourceType;
+            record.streamUrl = song.streamUrl;
+            record.artworkUrl = song.artworkUrl;
             record.title = song.title;
             record.artist = song.artist;
             record.displayName = song.displayName;
@@ -273,7 +302,7 @@ public class RoomDataManger {
             return true;
         } catch (Exception e) {
             e.printStackTrace();
-            return song != null && isKaraokeFavorite(song.filePath);
+            return song != null && isKaraokeFavorite(song);
         }
     }
 }

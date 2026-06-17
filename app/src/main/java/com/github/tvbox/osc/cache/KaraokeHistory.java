@@ -7,10 +7,7 @@ import androidx.room.PrimaryKey;
 
 import java.io.Serializable;
 
-/**
- * Karaoke playback history row, keyed by file path so re-plays upsert in place.
- */
-@Entity(tableName = "karaokeHistory", indices = {@Index(value = "filePath", unique = true)})
+@Entity(tableName = "karaokeHistory", indices = {@Index(value = "identityKey", unique = true)})
 public class KaraokeHistory implements Serializable {
     @PrimaryKey(autoGenerate = true)
     public int id;
@@ -41,4 +38,19 @@ public class KaraokeHistory implements Serializable {
 
     @ColumnInfo(name = "playbackPosition")
     public long playbackPosition;
+
+    @ColumnInfo(name = "identityKey")
+    public String identityKey;
+
+    @ColumnInfo(name = "trackId")
+    public String trackId;
+
+    @ColumnInfo(name = "sourceType")
+    public String sourceType;
+
+    @ColumnInfo(name = "streamUrl")
+    public String streamUrl;
+
+    @ColumnInfo(name = "artworkUrl")
+    public String artworkUrl;
 }

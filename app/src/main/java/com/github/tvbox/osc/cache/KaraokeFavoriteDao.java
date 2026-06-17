@@ -18,8 +18,14 @@ public interface KaraokeFavoriteDao {
     @Query("SELECT * FROM karaokeFavorite WHERE filePath = :filePath LIMIT 1")
     KaraokeFavorite getByPath(String filePath);
 
+    @Query("SELECT * FROM karaokeFavorite WHERE identityKey = :key LIMIT 1")
+    KaraokeFavorite getByIdentityKey(String key);
+
     @Query("DELETE FROM karaokeFavorite WHERE filePath = :filePath")
     int removeByPath(String filePath);
+
+    @Query("DELETE FROM karaokeFavorite WHERE identityKey = :key")
+    int removeByIdentityKey(String key);
 
     @Query("DELETE FROM karaokeFavorite")
     void clearAll();

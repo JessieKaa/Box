@@ -34,9 +34,12 @@ import com.github.tvbox.osc.karaoke.adapter.KaraokeQueueAdapter;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeSongGridAdapter;
 import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 import com.github.tvbox.osc.karaoke.controller.KaraokeController;
+import com.github.tvbox.osc.karaoke.lyric.KaraokeFullLyricView;
 import com.github.tvbox.osc.karaoke.lyric.KaraokeLyricLoader;
 import com.github.tvbox.osc.karaoke.playlist.KaraokeSession;
+import com.github.tvbox.osc.karaoke.util.KaraokeBgImageResolver;
 import com.github.tvbox.osc.karaoke.util.KaraokeFileScanner;
+import com.github.tvbox.osc.karaoke.widget.KaraokeBgCarouselView;
 import com.github.tvbox.osc.server.ControlManager;
 import com.github.tvbox.osc.player.IjkmPlayer;
 import com.github.tvbox.osc.player.MyVideoView;
@@ -46,8 +49,10 @@ import com.github.tvbox.osc.player.TrackInfoBean;
 import com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.tv.QRCodeGen;
+import com.github.tvbox.osc.ui.dialog.KaraokeApiUrlDialog;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.util.StorageDriveType;
 import com.obsez.android.lib.filechooser.ChooserDialog;
 import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
@@ -63,6 +68,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import tv.danmaku.ijk.media.player.IMediaPlayer;
+import tv.danmaku.ijk.media.player.IjkTimedText;
 import xyz.doikki.videoplayer.player.AbstractPlayer;
 import xyz.doikki.videoplayer.player.PlayerFactory;
 import xyz.doikki.videoplayer.player.VideoView;
@@ -72,8 +79,16 @@ public class KaraokeActivity extends BaseActivity {
 
     enum Mode { SELECT, PLAY }
     enum Tab { ALL, QUEUE, FAVORITES }
+    enum LibraryMode { LOCAL, REMOTE }
 
     private Mode currentMode = Mode.SELECT;
+    private LibraryMode libraryMode = LibraryMode.LOCAL;
+    private String remoteCursor = null;
+    private boolean remoteLoading = false;
+    private boolean remoteEndReached = false;
+    private final KaraokeApiService apiService = KaraokeApiService.get();
+    private int pendingPlayRequestToken = 0;
+    private int remoteLoadGeneration = 0;
     private KaraokeSong currentPlayingSong = null;
     private KaraokeSong currentSongForLyric = null;
     private long lastPlaybackPosition = 0;
@@ -81,6 +96,28 @@ public class KaraokeActivity extends BaseActivity {
     private int savedAudioTrackId = -1;
     private boolean pendingAudioTrackApply = false;
     private int errorCount = 0;
+
+    // Audio-only mode (MKA / FLAC / etc.) — set synchronously by extension in playSong
+    // and conservatively corrected by getVideoSize() polls after STATE_PLAYING.
+    private boolean currentIsAudioOnly = false;
+    // True when currentIsAudioOnly was flipped by the runtime zero-size correction
+    // (vs. by extension pre-judgement). The recovery branch uses this to allow
+    // .mkv/.mp4 containers to flip back to video when frames eventually appear.
+    private boolean audioOnlyFromRuntime = false;
+    private int zeroSizeReadCount = 0;
+    private boolean embeddedTrackSelectDone = false;
+    private IMediaPlayer.OnTimedTextListener embeddedLyricListener = null;
+    private Runnable pendingAudioOnlyCheck = null;
+    private Runnable pendingEmbeddedLyricWatchdog = null;
+    private Runnable pendingEmbeddedTrackRetry = null;
+    private int embeddedTrackRetryCount = 0;
+    private static final int MAX_EMBEDDED_TRACK_RETRIES = 6; // ~3s @ 500ms
+
+    // Background carousel — generation token prevents stale async lookups from
+    // polluting the carousel after a song switch (mirrors KaraokeLyricLoader pattern).
+    private KaraokeBgCarouselView bgCarouselView;
+    private KaraokeBgImageResolver bgResolver;
+    private int bgGeneration = 0;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingErrorPlay = null;
@@ -92,6 +129,7 @@ public class KaraokeActivity extends BaseActivity {
     private KaraokeController mController;
     private KaraokeSession session;
     private SimpleSubtitleView karaokeSubtitleView;
+    private KaraokeFullLyricView fullLyricView;
 
     // Select layer views
     private LinearLayout llSelectLayer;
@@ -131,10 +169,13 @@ public class KaraokeActivity extends BaseActivity {
         hideSystemUI(false);
         session = new KaraokeSession();
         lyricLoader = new KaraokeLyricLoader(this);
+        bgResolver = new KaraokeBgImageResolver();
 
         // Video player setup
         mVideoView = findViewById(R.id.mVideoView);
+        bgCarouselView = findViewById(R.id.bgCarouselView);
         mController = new KaraokeController(this);
+        fullLyricView = mController.getFullLyricView();
         mController.setCallback(new KaraokeController.KaraokeControllerCallback() {
             @Override
             public void onPrevious() {
@@ -205,6 +246,7 @@ public class KaraokeActivity extends BaseActivity {
                             pendingAudioTrackApply = false;
                         }
                     }
+                    scheduleAudioOnlyConservativeCheck();
                 }
             }
         });
@@ -240,11 +282,30 @@ public class KaraokeActivity extends BaseActivity {
         updateNowPlayingText();
 
         // Load saved folder or pick one
-        String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-        if (!savedFolder.isEmpty() && new File(savedFolder).exists()) {
-            loadFolder(savedFolder);
+        String modeValue = Hawk.get(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
+        libraryMode = "remote".equals(modeValue) ? LibraryMode.REMOTE : LibraryMode.LOCAL;
+        if (libraryMode == LibraryMode.REMOTE) {
+            String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
+            if (apiUrl.isEmpty()) {
+                Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
+                libraryMode = LibraryMode.LOCAL;
+                Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
+                String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                if (!savedFolder.isEmpty() && new File(savedFolder).exists()) {
+                    loadFolder(savedFolder);
+                } else {
+                    openFolderPicker();
+                }
+            } else {
+                loadRemoteLibrary(true);
+            }
         } else {
-            openFolderPicker();
+            String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+            if (!savedFolder.isEmpty() && new File(savedFolder).exists()) {
+                loadFolder(savedFolder);
+            } else {
+                openFolderPicker();
+            }
         }
 
         KaraokeRemoteManager.get().attach(this);
@@ -292,6 +353,19 @@ public class KaraokeActivity extends BaseActivity {
                 songGridAdapter.updateQueuedSet(session.getQueue());
                 updateQueueTabCount();
                 updateStartPlayButton();
+            }
+        });
+        rvSongGrid.addOnScrollListener(new androidx.recyclerview.widget.RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull androidx.recyclerview.widget.RecyclerView recyclerView, int dx, int dy) {
+                super.onScrolled(recyclerView, dx, dy);
+                if (libraryMode != LibraryMode.REMOTE || remoteLoading || remoteEndReached) return;
+                androidx.recyclerview.widget.GridLayoutManager lm = (androidx.recyclerview.widget.GridLayoutManager) recyclerView.getLayoutManager();
+                if (lm == null) return;
+                int lastVisible = lm.findLastVisibleItemPosition();
+                if (lastVisible >= songGridAdapter.getItemCount() - 1 && songGridAdapter.getItemCount() > 0) {
+                    loadRemoteLibrary(false);
+                }
             }
         });
 
@@ -567,6 +641,27 @@ public class KaraokeActivity extends BaseActivity {
             karaokeSubtitleView.setVisibility(View.GONE);
             karaokeSubtitleView.reset();
         }
+        detachEmbeddedLyricListener();
+        embeddedTrackSelectDone = false;
+        if (fullLyricView != null) {
+            fullLyricView.reset();
+            fullLyricView.setVisibility(View.GONE);
+        }
+        if (bgCarouselView != null) {
+            bgCarouselView.stop();
+            bgCarouselView.setVisibility(View.GONE);
+        }
+        if (bgResolver != null) bgResolver.cancelAll();
+        bgGeneration++;
+        if (mController != null) mController.stopLyricPoll();
+        if (pendingAudioOnlyCheck != null) {
+            mainHandler.removeCallbacks(pendingAudioOnlyCheck);
+            pendingAudioOnlyCheck = null;
+        }
+        if (pendingEmbeddedLyricWatchdog != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+            pendingEmbeddedLyricWatchdog = null;
+        }
 
         mVideoView.setVisibility(View.GONE);
         llSelectLayer.setVisibility(View.VISIBLE);
@@ -583,85 +678,118 @@ public class KaraokeActivity extends BaseActivity {
             loadFavorites();
         } else {
             songGridAdapter.updateQueuedSet(session.getQueue());
+            if (libraryMode == LibraryMode.REMOTE) {
+                rebuildVisibleSongs();
+            }
         }
     }
 
     private void enterPlayMode(KaraokeSong song) {
         if (song == null) return;
+        // Capture the prior mode so we can tell apart "real SELECT→PLAY transition
+        // (resume case)" from "playSong already launched this song, just transition UI".
+        // playSong sets currentMode = PLAY itself, so after a playSong + enterPlayMode
+        // sequence wasSelect is false and we skip the resume branch.
+        boolean wasSelect = (currentMode == Mode.SELECT);
         currentMode = Mode.PLAY;
         userPaused = false;
+        llSelectLayer.setVisibility(View.GONE);
+        llQRCode.setVisibility(View.GONE);
 
-        // Same song and has saved position → resume
-        if (currentPlayingSong != null
+        // SELECT → PLAY with the same song that has a saved pause position → resume
+        // without relaunching the player.
+        if (wasSelect
+                && currentPlayingSong != null
                 && song.equals(currentPlayingSong)
                 && lastPlaybackPosition > 0) {
-            mVideoView.setVisibility(View.VISIBLE);
-            llSelectLayer.setVisibility(View.GONE);
-            llQRCode.setVisibility(View.GONE);
+            mVideoView.setVisibility(currentIsAudioOnly ? View.GONE : View.VISIBLE);
             mVideoView.seekTo(lastPlaybackPosition);
             mVideoView.start();
             mController.setSongTitle(currentPlayingSong.displayName);
             pushNextUpToController();
+            // Re-evaluate audio-only UI in case the toggle changed while paused
+            applyAudioOnlyUi(currentIsAudioOnly);
             startLyricForSong(currentPlayingSong);
+            return;
+        }
+
+        // New song: delegate launch to playSong (single source of truth — avoids the
+        // double mVideoView.start()/startLyricForSong() that used to happen when both
+        // methods were called in sequence). If the song is already current (dual-call
+        // pattern after playSong), just refresh surface visibility — no relaunch,
+        // no re-load of lyrics.
+        if (currentPlayingSong == null || !song.equals(currentPlayingSong)) {
+            playSong(song);
         } else {
-            // New song — pull history for resume position
-            KaraokeSong loaded = song;
-            long resumeMs = 0;
-            com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(song.filePath);
-            if (h != null && h.playbackPosition > 5000 && h.duration > h.playbackPosition + 1000) {
-                resumeMs = h.playbackPosition;
-                loaded.duration = h.duration;
-            }
-            loaded.favorite = RoomDataManger.isKaraokeFavorite(song.filePath);
-            currentPlayingSong = loaded;
-            lastPlaybackPosition = resumeMs;
-            pendingAudioTrackApply = true;
-            mVideoView.release();
-            mVideoView.setUrl(loaded.filePath);
-            mVideoView.setVisibility(View.VISIBLE);
-            llSelectLayer.setVisibility(View.GONE);
-            llQRCode.setVisibility(View.GONE);
-            mVideoView.start();
-            mController.setSongTitle(loaded.displayName);
-            mController.setTrackInfo("");
-            queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+            mVideoView.setVisibility(currentIsAudioOnly ? View.GONE : View.VISIBLE);
+            mController.setSongTitle(song.displayName);
             pushNextUpToController();
-            recordKaraokeHistory(loaded, resumeMs);
-            startLyricForSong(loaded);
         }
     }
 
     private void startLyricForSong(KaraokeSong song) {
         currentSongForLyric = song;
+        // Always start clean: cancel any prior IJK timed-text listener so stale callbacks
+        // don't fire into a half-torn-down view.
+        detachEmbeddedLyricListener();
+
         boolean lyricEnabled = Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true);
-        if (!lyricEnabled || lyricLoader == null || karaokeSubtitleView == null) {
-            karaokeSubtitleView.setVisibility(View.GONE);
-            return;
+        boolean fullLyricOn = Hawk.get(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, true);
+
+        // Audio-only + fullscreen toggle ON → use fullLyricView; legacy simple view stays hidden.
+        if (currentIsAudioOnly) {
+            if (karaokeSubtitleView != null) karaokeSubtitleView.setVisibility(View.GONE);
+            if (!lyricEnabled || !fullLyricOn) {
+                if (fullLyricView != null) {
+                    fullLyricView.reset();
+                    fullLyricView.setVisibility(View.GONE);
+                }
+                return;
+            }
+        } else {
+            // Video mode: hide full-screen lyric; legacy path takes over (when enabled).
+            if (fullLyricView != null) {
+                fullLyricView.reset();
+                fullLyricView.setVisibility(View.GONE);
+            }
+            if (!lyricEnabled || lyricLoader == null || karaokeSubtitleView == null) {
+                if (karaokeSubtitleView != null) karaokeSubtitleView.setVisibility(View.GONE);
+                return;
+            }
         }
+
+        if (lyricLoader == null) return;
         lyricLoader.loadFor(song, new KaraokeLyricLoader.Callback() {
             @Override
             public void onLyricReady(KaraokeSong requested, com.github.tvbox.osc.subtitle.model.TimedTextObject tto) {
                 if (currentSongForLyric == null || !currentSongForLyric.equals(requested)) return;
-                karaokeSubtitleView.bindToMediaPlayer(mVideoView.getMediaPlayer());
-                // FormatLRC.toFile() emits real `[mm:ss.xx]lyric` lines so SubtitleLoader's
-                // extension-based dispatch routes the temp file back to FormatLRC.
-                try {
-                    File tmp = new File(getCacheDir(), "karaoke_lyric_" + requested.filePath.hashCode() + ".lrc");
-                    String[] lines = tto != null ? new com.github.tvbox.osc.subtitle.format.FormatLRC().toFile(tto) : null;
-                    if (lines == null || lines.length == 0) {
-                        karaokeSubtitleView.setVisibility(View.GONE);
-                        return;
-                    }
-                    java.io.PrintWriter pw = new java.io.PrintWriter(tmp, "UTF-8");
+                if (currentIsAudioOnly) {
+                    if (fullLyricView == null) return;
+                    fullLyricView.setTimedTextObject(tto);
+                    fullLyricView.setVisibility(View.VISIBLE);
+                    mController.startLyricPoll();
+                } else {
+                    karaokeSubtitleView.bindToMediaPlayer(mVideoView.getMediaPlayer());
+                    // FormatLRC.toFile() emits real `[mm:ss.xx]lyric` lines so SubtitleLoader's
+                    // extension-based dispatch routes the temp file back to FormatLRC.
                     try {
-                        for (String s : lines) pw.println(s);
-                    } finally {
-                        pw.close();
+                        File tmp = new File(getCacheDir(), "karaoke_lyric_" + requested.filePath.hashCode() + ".lrc");
+                        String[] lines = tto != null ? new com.github.tvbox.osc.subtitle.format.FormatLRC().toFile(tto) : null;
+                        if (lines == null || lines.length == 0) {
+                            karaokeSubtitleView.setVisibility(View.GONE);
+                            return;
+                        }
+                        java.io.PrintWriter pw = new java.io.PrintWriter(tmp, "UTF-8");
+                        try {
+                            for (String s : lines) pw.println(s);
+                        } finally {
+                            pw.close();
+                        }
+                        karaokeSubtitleView.setSubtitlePath(tmp.getAbsolutePath());
+                        karaokeSubtitleView.setVisibility(View.VISIBLE);
+                    } catch (Throwable t) {
+                        karaokeSubtitleView.setVisibility(View.GONE);
                     }
-                    karaokeSubtitleView.setSubtitlePath(tmp.getAbsolutePath());
-                    karaokeSubtitleView.setVisibility(View.VISIBLE);
-                } catch (Throwable t) {
-                    karaokeSubtitleView.setVisibility(View.GONE);
                 }
             }
 
@@ -672,12 +800,263 @@ public class KaraokeActivity extends BaseActivity {
                     karaokeSubtitleView.setVisibility(View.GONE);
                     karaokeSubtitleView.reset();
                 }
+                // Audio-only: try embedded IJK timed-text as a fallback. IJK's API gives
+                // us text per callback but no timestamps, so we render in LIVE mode.
+                if (currentIsAudioOnly && Hawk.get(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, true)) {
+                    attachEmbeddedLyricListener();
+                    if (fullLyricView != null) {
+                        fullLyricView.setMode(KaraokeFullLyricView.MODE_LIVE);
+                        fullLyricView.setVisibility(View.VISIBLE);
+                    }
+                    // If the player is already STATE_PLAYING, select the track now;
+                    // otherwise the STATE_PLAYING conservative-check hook will trigger it.
+                    maybeSelectEmbeddedTrack();
+                }
             }
         });
     }
 
+    private void attachEmbeddedLyricListener() {
+        if (embeddedLyricListener != null) return;
+        AbstractPlayer mp = mVideoView == null ? null : mVideoView.getMediaPlayer();
+        if (!(mp instanceof IjkmPlayer)) return;
+        embeddedLyricListener = new IMediaPlayer.OnTimedTextListener() {
+            @Override
+            public void onTimedText(IMediaPlayer iMediaPlayer, IjkTimedText text) {
+                if (fullLyricView == null) return;
+                if (text != null) {
+                    fullLyricView.setLiveText(text.getText());
+                } else {
+                    fullLyricView.setLiveText(null);
+                }
+            }
+        };
+        try {
+            ((IjkmPlayer) mp).setOnTimedTextListener(embeddedLyricListener);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private void detachEmbeddedLyricListener() {
+        if (pendingEmbeddedLyricWatchdog != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+            pendingEmbeddedLyricWatchdog = null;
+        }
+        if (pendingEmbeddedTrackRetry != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+            pendingEmbeddedTrackRetry = null;
+        }
+        if (embeddedLyricListener == null) return;
+        AbstractPlayer mp = mVideoView == null ? null : mVideoView.getMediaPlayer();
+        if (mp instanceof IjkmPlayer) {
+            try {
+                ((IjkmPlayer) mp).setOnTimedTextListener(null);
+            } catch (Throwable ignore) {
+            }
+        }
+        embeddedLyricListener = null;
+    }
+
+    /**
+     * State-driven embedded-subtitle track selection. The {@link #embeddedTrackSelectDone}
+     * guard ensures we only call {@code setTrack} once per song. Selecting the track is
+     * what causes IJK to start firing {@link IMediaPlayer.OnTimedTextListener}.
+     *
+     * Non-terminal when track info isn't ready yet: if {@code getFirstEmbeddedSubtitleTrackIndex()}
+     * returns {@code null} (player still preparing, track list not populated), we DON'T
+     * mark done — we schedule a bounded retry (up to {@link #MAX_EMBEDDED_TRACK_RETRIES}
+     * attempts at 500ms intervals, ~3s total). Only when we actually call
+     * {@code setTrack} do we mark done and schedule the 1.5s watchdog that surfaces a
+     * toast if IJK still hasn't fired timed text by then. If we exhaust retries without
+     * ever finding a track, we surface the same toast so the user knows to drop in an
+     * external {@code .lrc}.
+     */
+    private void maybeSelectEmbeddedTrack() {
+        if (embeddedTrackSelectDone) return;
+        if (!currentIsAudioOnly) return;
+        if (!Hawk.get(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, true)) return;
+        AbstractPlayer mp = mVideoView == null ? null : mVideoView.getMediaPlayer();
+        if (!(mp instanceof IjkmPlayer)) {
+            scheduleEmbeddedTrackRetry();
+            return;
+        }
+        IjkmPlayer ijk = (IjkmPlayer) mp;
+        Integer idx = ijk.getFirstEmbeddedSubtitleTrackIndex();
+        if (idx == null) {
+            // Track list not ready yet — retry on a bounded schedule.
+            scheduleEmbeddedTrackRetry();
+            return;
+        }
+        embeddedTrackSelectDone = true;
+        if (pendingEmbeddedTrackRetry != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+            pendingEmbeddedTrackRetry = null;
+        }
+        try {
+            ijk.setTrack(idx);
+        } catch (Throwable ignore) {
+        }
+        scheduleEmbeddedLyricWatchdog();
+    }
+
+    private void scheduleEmbeddedTrackRetry() {
+        if (pendingEmbeddedTrackRetry != null) mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+        if (embeddedTrackRetryCount >= MAX_EMBEDDED_TRACK_RETRIES) {
+            // Out of retries — track list really is empty. Mark done so subsequent
+            // STATE_PLAYING ticks don't keep trying, and tell the user.
+            embeddedTrackSelectDone = true;
+            Toast.makeText(mContext, getString(R.string.karaoke_no_embedded_lyric), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        embeddedTrackRetryCount++;
+        pendingEmbeddedTrackRetry = new Runnable() {
+            @Override
+            public void run() {
+                pendingEmbeddedTrackRetry = null;
+                maybeSelectEmbeddedTrack();
+            }
+        };
+        mainHandler.postDelayed(pendingEmbeddedTrackRetry, 500);
+    }
+
+    /**
+     * Watchdog: 1.5s after we select an embedded subtitle track, check whether the
+     * fullLyricView received any text via IJK's OnTimedTextListener. If not, surface
+     * a toast so the user knows to drop in an external {@code .lrc}.
+     */
+    private void scheduleEmbeddedLyricWatchdog() {
+        if (pendingEmbeddedLyricWatchdog != null) mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+        final KaraokeSong song = currentPlayingSong;
+        pendingEmbeddedLyricWatchdog = new Runnable() {
+            @Override
+            public void run() {
+                pendingEmbeddedLyricWatchdog = null;
+                if (currentSongForLyric == null || !currentSongForLyric.equals(song)) return;
+                if (!currentIsAudioOnly) return;
+                if (fullLyricView == null) return;
+                // If we've since switched to SCROLL mode (external .lrc landed late) or
+                // the listener already produced text, fullLyricView has content — no toast.
+                if (fullLyricView.getMode() == KaraokeFullLyricView.MODE_SCROLL) return;
+                if (fullLyricView.hasLiveText()) return;
+                Toast.makeText(mContext, getString(R.string.karaoke_no_embedded_lyric), Toast.LENGTH_SHORT).show();
+            }
+        };
+        mainHandler.postDelayed(pendingEmbeddedLyricWatchdog, 1500);
+    }
+
+    /**
+     * After STATE_PLAYING, poll {@code getVideoSize()} for a bounded window (~5s) to
+     * detect the "extension says video but IJK sees no video track" case (e.g. some
+     * .mkv with only audio, or .mkv whose video track inits slowly). Conservative
+     * flip: require 2 consecutive zero-size reads before flipping video → audio.
+     * Recovery: any subsequent non-zero read flips back. Polling continues for the
+     * full window even after a runtime flip so slow-starting video tracks can still
+     * be picked up.
+     */
+    private void scheduleAudioOnlyConservativeCheck() {
+        if (pendingAudioOnlyCheck != null) mainHandler.removeCallbacks(pendingAudioOnlyCheck);
+        pendingAudioOnlyCheck = new Runnable() {
+            private int polls = 0;
+            private static final int MAX_POLLS = 10; // 10 × 500ms ≈ 5s after STATE_PLAYING
+            @Override
+            public void run() {
+                pendingAudioOnlyCheck = null;
+                polls++;
+                if (currentPlayingSong == null) return;
+                int[] size = mVideoView.getVideoSize();
+                boolean zero = size == null || size.length < 2 || size[0] == 0 || size[1] == 0;
+                if (zero) {
+                    zeroSizeReadCount++;
+                    if (!currentIsAudioOnly && zeroSizeReadCount >= 2) {
+                        // Initial flip: extension said video but IJK insists no frames.
+                        currentIsAudioOnly = true;
+                        audioOnlyFromRuntime = true;
+                        applyAudioOnlyUi(true);
+                        startLyricForSong(currentPlayingSong);
+                    }
+                    // Keep polling while budget remains — slow video tracks may appear.
+                    if (polls < MAX_POLLS) {
+                        pendingAudioOnlyCheck = this;
+                        mainHandler.postDelayed(this, 500);
+                    }
+                } else {
+                    // Non-zero size — IJK has video frames. Flip back to video if we
+                    // had flipped to audio at runtime, or if extension is audio but
+                    // IJK is authoritative.
+                    boolean shouldRecover = currentIsAudioOnly
+                            && (audioOnlyFromRuntime || isAudioExtension(currentPlayingSong.filePath));
+                    if (shouldRecover) {
+                        currentIsAudioOnly = false;
+                        audioOnlyFromRuntime = false;
+                        applyAudioOnlyUi(false);
+                        startLyricForSong(currentPlayingSong);
+                    }
+                    zeroSizeReadCount = 0;
+                    // Definitive answer — stop polling.
+                }
+                maybeSelectEmbeddedTrack();
+            }
+        };
+        mainHandler.postDelayed(pendingAudioOnlyCheck, 300);
+    }
+
+    /** Extension-based audio pre-judgement — the sync path that avoids fullscreen flicker. */
+    private boolean isAudioExtension(String path) {
+        if (path == null) return false;
+        int dot = path.lastIndexOf('.');
+        if (dot < 0 || dot + 1 >= path.length()) return false;
+        return StorageDriveType.isKaraokeAudioType(path.substring(dot + 1));
+    }
+
+    /**
+     * Toggle all UI surfaces that depend on audio-only mode: player surface visibility,
+     * controller mode flag, and background carousel. The carousel runs an async image
+     * resolution; a generation token protects against stale callbacks landing after a
+     * song switch. The token is owned by {@link KaraokeBgImageResolver#nextGeneration()}
+     * — {@code bgGeneration} is just a mirror so the UI thread can re-check after the
+     * resolver's own check passes.
+     */
+    private void applyAudioOnlyUi(boolean audioOnly) {
+        currentIsAudioOnly = audioOnly;
+        if (mController != null) mController.setAudioOnlyMode(audioOnly);
+        if (mVideoView != null) mVideoView.setVisibility(audioOnly ? View.GONE : View.VISIBLE);
+        if (bgCarouselView == null) return;
+        boolean bgOn = Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true);
+        if (audioOnly && bgOn) {
+            bgCarouselView.setVisibility(View.VISIBLE);
+            final KaraokeSong song = currentPlayingSong;
+            if (bgResolver != null && song != null) {
+                // Single source of truth for the generation token. Resolver.deliver()
+                // already filters stale callbacks before invoking onResolved, but we
+                // keep a local mirror for an extra UI-thread check just in case.
+                bgGeneration = bgResolver.nextGeneration();
+                final int gen = bgGeneration;
+                bgResolver.resolveAsync(song, gen, new KaraokeBgImageResolver.Callback() {
+                    @Override
+                    public void onResolved(int generation, List<Object> sources) {
+                        if (generation != bgGeneration) return;
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (gen != bgGeneration) return;
+                                bgCarouselView.setSources(sources);
+                                bgCarouselView.start();
+                            }
+                        });
+                    }
+                });
+            }
+        } else {
+            bgCarouselView.stop();
+            bgCarouselView.setVisibility(View.GONE);
+            // Bump resolver's counter so any in-flight callback is dropped on deliver().
+            if (bgResolver != null) bgResolver.cancelAll();
+            bgGeneration++; // local mirror keeps UI-thread check consistent
+        }
+    }
+
     private void recordKaraokeHistory(final KaraokeSong song, final long playbackPosition) {
-        if (song == null || song.filePath == null) return;
+        if (song == null || song.identityKey() == null) return;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -688,32 +1067,103 @@ public class KaraokeActivity extends BaseActivity {
 
     private void persistCurrentPlaybackPosition() {
         final KaraokeSong song = currentPlayingSong;
-        if (song == null || song.filePath == null) return;
+        if (song == null || song.identityKey() == null) return;
         final long position = lastPlaybackPosition;
         new Thread(new Runnable() {
             @Override
             public void run() {
-                RoomDataManger.updateKaraokePlaybackPosition(song.filePath, position);
+                RoomDataManger.updateKaraokePlaybackPosition(song, position);
             }
         }).start();
     }
 
     // ======================== Playback ========================
 
+    /**
+     * Single entry point for launching a brand-new song.
+     */
     private void playSong(KaraokeSong song) {
         if (song == null) return;
+        currentMode = Mode.PLAY;
         currentPlayingSong = song;
-        lastPlaybackPosition = 0;
         userPaused = false;
         pendingAudioTrackApply = true;
+        embeddedTrackSelectDone = false;
+        embeddedTrackRetryCount = 0;
+        zeroSizeReadCount = 0;
+        audioOnlyFromRuntime = false;
+        if (pendingEmbeddedTrackRetry != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+            pendingEmbeddedTrackRetry = null;
+        }
+        pendingPlayRequestToken++;
+        final int myToken = pendingPlayRequestToken;
+
+        long resumeMs = 0;
+        com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(song);
+        if (h != null && h.playbackPosition > 5000 && h.duration > h.playbackPosition + 1000) {
+            resumeMs = h.playbackPosition;
+            song.duration = h.duration;
+        }
+        lastPlaybackPosition = resumeMs;
+        song.favorite = RoomDataManger.isKaraokeFavorite(song);
+
+        if (!"remote".equals(song.sourceType)) {
+            currentIsAudioOnly = isAudioExtension(song.filePath);
+            applyAudioOnlyUi(currentIsAudioOnly);
+            launchPlayback(song, myToken);
+            return;
+        }
+
+        currentIsAudioOnly = false;
+        applyAudioOnlyUi(false);
+
+        apiService.getTrackDetail(song.trackId, new KaraokeApiService.DetailCallback() {
+            @Override
+            public void onSuccess(KaraokeSong fresh) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (myToken != pendingPlayRequestToken) return;
+                        song.streamUrl = fresh.streamUrl;
+                        song.artworkUrl = fresh.artworkUrl;
+                        launchPlayback(song, myToken);
+                        recordKaraokeHistory(song, lastPlaybackPosition);
+                    }
+                });
+            }
+
+            @Override
+            public void onFailure(String msg) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (myToken != pendingPlayRequestToken) return;
+                        if (song.streamUrl == null || song.streamUrl.isEmpty()) {
+                            Toast.makeText(mContext, R.string.karaoke_remote_no_stream, Toast.LENGTH_SHORT).show();
+                            enterSelectMode();
+                            return;
+                        }
+                        launchPlayback(song, myToken);
+                    }
+                });
+            }
+        });
+    }
+
+    private void launchPlayback(KaraokeSong song, int token) {
+        if (token != pendingPlayRequestToken) return;
+        boolean isRemote = "remote".equals(song.sourceType);
         mVideoView.release();
-        mVideoView.setUrl(song.filePath);
+        mVideoView.setUrl(isRemote ? song.streamUrl : song.filePath);
+        if (!currentIsAudioOnly) mVideoView.setVisibility(View.VISIBLE);
         mVideoView.start();
+        if (lastPlaybackPosition > 0) mVideoView.seekTo(lastPlaybackPosition);
         mController.setSongTitle(song.displayName);
         mController.setTrackInfo("");
         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
         pushNextUpToController();
-        recordKaraokeHistory(song, 0);
+        recordKaraokeHistory(song, lastPlaybackPosition);
         startLyricForSong(song);
     }
 
@@ -856,8 +1306,7 @@ public class KaraokeActivity extends BaseActivity {
     }
 
     private void toggleFavorite(final KaraokeSong song) {
-        if (song == null || song.filePath == null) return;
-        final String path = song.filePath;
+        if (song == null || song.identityKey() == null) return;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -865,21 +1314,14 @@ public class KaraokeActivity extends BaseActivity {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        // Synchronize the favorite flag across every backing dataset that may hold
-                        // a different KaraokeSong instance for the same path. Queue items are added
-                        // by reference from the library; favorites-grid items are re-hydrated from
-                        // Room rows. Without touching each dataset, the heart on the unchanged rows
-                        // keeps showing the stale value after a notifyItemChanged rebind.
-                        applyFavoriteTo(session.getLibrary(), path, isFav);
-                        applyFavoriteTo(session.getQueue(), path, isFav);
-                        applyFavoriteTo(session.getFavorites(), path, isFav);
-                        applyFavoriteTo(favoriteAdapter.getData(), path, isFav);
-                        applyFavoriteTo(queueAdapter.getData(), path, isFav);
-                        // Targeted refresh: only notify rows whose song matches this path so D-pad
-                        // focus is preserved across the whole library grid + queue + favorites grid.
-                        songGridAdapter.notifyFavoriteChanged(path);
-                        favoriteAdapter.notifyFavoriteChanged(path);
-                        queueAdapter.notifyFavoriteChanged(path);
+                        applyFavoriteTo(session.getLibrary(), song, isFav);
+                        applyFavoriteTo(session.getQueue(), song, isFav);
+                        applyFavoriteTo(session.getFavorites(), song, isFav);
+                        applyFavoriteTo(favoriteAdapter.getData(), song, isFav);
+                        applyFavoriteTo(queueAdapter.getData(), song, isFav);
+                        songGridAdapter.notifyFavoriteChanged(song);
+                        favoriteAdapter.notifyFavoriteChanged(song);
+                        queueAdapter.notifyFavoriteChanged(song);
                         Toast.makeText(mContext, getString(isFav
                                 ? R.string.karaoke_favorite_added
                                 : R.string.karaoke_favorite_removed), Toast.LENGTH_SHORT).show();
@@ -890,13 +1332,21 @@ public class KaraokeActivity extends BaseActivity {
         }).start();
     }
 
-    private static void applyFavoriteTo(List<KaraokeSong> list, String path, boolean fav) {
-        if (list == null || path == null) return;
+    private static void applyFavoriteTo(List<KaraokeSong> list, KaraokeSong song, boolean fav) {
+        if (list == null || song == null) return;
         for (KaraokeSong s : list) {
-            if (s != null && path.equals(s.filePath)) {
+            if (s != null && s.equals(song)) {
                 s.favorite = fav;
             }
         }
+    }
+
+    private static void applyFavoriteTo(List<KaraokeSong> list, String path, boolean fav) {
+        if (list == null || path == null) return;
+        KaraokeSong stub = new KaraokeSong();
+        stub.sourceType = "local";
+        stub.filePath = path;
+        applyFavoriteTo(list, stub, fav);
     }
 
     private void rebuildVisibleSongs() {
@@ -931,11 +1381,23 @@ public class KaraokeActivity extends BaseActivity {
                 Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true));
         final String optLyric = formatToggle(R.string.karaoke_settings_lyric,
                 Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true));
+        final String optFullscreenLyric = formatToggle(R.string.karaoke_settings_fullscreen_lyric,
+                Hawk.get(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, true));
+        final String optBgCarousel = formatToggle(R.string.karaoke_settings_bg_carousel,
+                Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true));
         final String optRescan = getString(R.string.karaoke_settings_rescan);
-        final String[] items = new String[] { optRecursive, optLyric, optRescan };
+        final String optMode = formatMode(R.string.karaoke_settings_library_mode,
+                libraryMode == LibraryMode.REMOTE);
+        final String optApiUrl = getString(R.string.karaoke_settings_api_url) + ": " +
+                abbreviate(Hawk.get(HawkConfig.KARAOKE_API_URL, ""));
+        final String[] items = new String[] { optRecursive, optLyric, optFullscreenLyric, optBgCarousel, optRescan, optMode, optApiUrl };
         final boolean[] state = new boolean[] {
                 Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true),
                 Hawk.get(HawkConfig.KARAOKE_LYRIC_ENABLED, true),
+                Hawk.get(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, true),
+                Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true),
+                false,
+                libraryMode == LibraryMode.REMOTE,
                 false
         };
         java.util.List<String> data = new java.util.ArrayList<>(java.util.Arrays.asList(items));
@@ -948,7 +1410,6 @@ public class KaraokeActivity extends BaseActivity {
                     Hawk.put(HawkConfig.KARAOKE_SCAN_RECURSIVE, newVal);
                     Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_scan_recursive, newVal),
                             Toast.LENGTH_SHORT).show();
-                    // Setting change invalidates cached signature; reload to apply.
                     String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
                     if (!folder.isEmpty() && new File(folder).exists()) {
                         loadFolder(folder);
@@ -958,14 +1419,54 @@ public class KaraokeActivity extends BaseActivity {
                     Hawk.put(HawkConfig.KARAOKE_LYRIC_ENABLED, newVal);
                     Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_lyric, newVal),
                             Toast.LENGTH_SHORT).show();
-                    if (!newVal && currentMode == Mode.PLAY && karaokeSubtitleView != null) {
-                        karaokeSubtitleView.setVisibility(View.GONE);
-                        karaokeSubtitleView.reset();
+                    if (!newVal && currentMode == Mode.PLAY) {
+                        if (karaokeSubtitleView != null) {
+                            karaokeSubtitleView.setVisibility(View.GONE);
+                            karaokeSubtitleView.reset();
+                        }
+                        if (fullLyricView != null) {
+                            fullLyricView.reset();
+                            fullLyricView.setVisibility(View.GONE);
+                        }
+                        detachEmbeddedLyricListener();
                         if (lyricLoader != null) lyricLoader.cancelAll();
+                        if (mController != null) mController.stopLyricPoll();
                     } else if (newVal && currentMode == Mode.PLAY && currentPlayingSong != null) {
                         startLyricForSong(currentPlayingSong);
                     }
                 } else if (pos == 2) {
+                    boolean newVal = !state[2];
+                    Hawk.put(HawkConfig.KARAOKE_FULLSCREEN_LYRIC, newVal);
+                    Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_fullscreen_lyric, newVal),
+                            Toast.LENGTH_SHORT).show();
+                    if (!newVal) {
+                        if (fullLyricView != null) {
+                            fullLyricView.reset();
+                            fullLyricView.setVisibility(View.GONE);
+                        }
+                        detachEmbeddedLyricListener();
+                        embeddedTrackSelectDone = true;
+                        if (mController != null) mController.stopLyricPoll();
+                    } else {
+                        embeddedTrackSelectDone = false;
+                        if (currentMode == Mode.PLAY && currentIsAudioOnly && currentPlayingSong != null) {
+                            startLyricForSong(currentPlayingSong);
+                        }
+                    }
+                } else if (pos == 3) {
+                    boolean newVal = !state[3];
+                    Hawk.put(HawkConfig.KARAOKE_BG_CAROUSEL, newVal);
+                    Toast.makeText(mContext, formatToggle(R.string.karaoke_settings_bg_carousel, newVal),
+                            Toast.LENGTH_SHORT).show();
+                    if (currentMode == Mode.PLAY) {
+                        applyAudioOnlyUi(currentIsAudioOnly);
+                    } else if (!newVal && bgCarouselView != null) {
+                        bgCarouselView.stop();
+                        bgCarouselView.setVisibility(View.GONE);
+                        if (bgResolver != null) bgResolver.cancelAll();
+                        bgGeneration++;
+                    }
+                } else if (pos == 4) {
                     String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
                     if (!folder.isEmpty() && new File(folder).exists()) {
                         stopPlaybackAndReturnToSelect();
@@ -973,6 +1474,61 @@ public class KaraokeActivity extends BaseActivity {
                     } else {
                         Toast.makeText(mContext, getString(R.string.karaoke_error_no_folder), Toast.LENGTH_SHORT).show();
                     }
+                } else if (pos == 5) {
+                    LibraryMode newMode = libraryMode == LibraryMode.LOCAL ? LibraryMode.REMOTE : LibraryMode.LOCAL;
+                    if (newMode == LibraryMode.REMOTE) {
+                        String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
+                        if (apiUrl.isEmpty()) {
+                            Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                    }
+                    libraryMode = newMode;
+                    Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, libraryMode == LibraryMode.REMOTE ? "remote" : "local");
+                    stopPlaybackAndReturnToSelect();
+                    pendingPlayRequestToken++;
+                    apiService.cancelAll();
+                    apiService.cancelDetail();
+                    session.clearQueue();
+                    activeArtist = null;
+                    activeSearch = "";
+                    etSearch.setText("");
+                    artistAdapter.setSelectedPosition(0);
+                    if (libraryMode == LibraryMode.REMOTE) {
+                        loadRemoteLibrary(true);
+                    } else {
+                        String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                        if (!folder.isEmpty() && new File(folder).exists()) {
+                            loadFolder(folder);
+                        } else {
+                            openFolderPicker();
+                        }
+                    }
+                } else if (pos == 6) {
+                    KaraokeApiUrlDialog urlDialog = new KaraokeApiUrlDialog(KaraokeActivity.this);
+                    urlDialog.setOnListener(new KaraokeApiUrlDialog.OnListener() {
+                        @Override
+                        public void onchange(String url) {
+                            // Cleared URL while in remote mode → fall back to local and
+                            // tear down any in-flight remote state.
+                            if (libraryMode == LibraryMode.REMOTE && (url == null || url.isEmpty())) {
+                                libraryMode = LibraryMode.LOCAL;
+                                Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
+                                stopPlaybackAndReturnToSelect();
+                                pendingPlayRequestToken++;
+                                apiService.cancelAll();
+                                apiService.cancelDetail();
+                                session.clearQueue();
+                                String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                                if (!folder.isEmpty() && new File(folder).exists()) {
+                                    loadFolder(folder);
+                                } else {
+                                    openFolderPicker();
+                                }
+                            }
+                        }
+                    });
+                    urlDialog.show();
                 }
             }
 
@@ -998,6 +1554,19 @@ public class KaraokeActivity extends BaseActivity {
         String base = getString(resId);
         String suffix = on ? ": ON" : ": OFF";
         return base + suffix;
+    }
+
+    private String formatMode(int resId, boolean remote) {
+        String base = getString(resId);
+        String suffix = remote ? ": " + getString(R.string.karaoke_settings_library_mode_remote)
+                : ": " + getString(R.string.karaoke_settings_library_mode_local);
+        return base + suffix;
+    }
+
+    private String abbreviate(String url) {
+        if (url == null || url.isEmpty()) return getString(R.string.karaoke_settings_api_url_none);
+        if (url.length() <= 28) return url;
+        return url.substring(0, 12) + "…" + url.substring(url.length() - 13);
     }
 
     private void updateStartPlayButton() {
@@ -1053,11 +1622,34 @@ public class KaraokeActivity extends BaseActivity {
         if (currentMode == Mode.PLAY) {
             if (mVideoView != null) {
                 mVideoView.pause();
+                lastPlaybackPosition = mVideoView.getCurrentPosition();
+                persistCurrentPlaybackPosition();
                 mVideoView.release();
             }
             currentPlayingSong = null;
             lastPlaybackPosition = 0;
             userPaused = false;
+            detachEmbeddedLyricListener();
+            embeddedTrackSelectDone = false;
+            if (bgCarouselView != null) {
+                bgCarouselView.stop();
+                bgCarouselView.setVisibility(View.GONE);
+            }
+            if (bgResolver != null) bgResolver.cancelAll();
+            bgGeneration++;
+            if (fullLyricView != null) {
+                fullLyricView.reset();
+                fullLyricView.setVisibility(View.GONE);
+            }
+            if (mController != null) mController.stopLyricPoll();
+            if (pendingAudioOnlyCheck != null) {
+                mainHandler.removeCallbacks(pendingAudioOnlyCheck);
+                pendingAudioOnlyCheck = null;
+            }
+            if (pendingEmbeddedLyricWatchdog != null) {
+                mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+                pendingEmbeddedLyricWatchdog = null;
+            }
             enterSelectMode();
         }
     }
@@ -1090,6 +1682,10 @@ public class KaraokeActivity extends BaseActivity {
     }
 
     void loadFolder(final String folderPath) {
+        if (libraryMode == LibraryMode.REMOTE) {
+            loadRemoteLibrary(true);
+            return;
+        }
         if (scanCancelSignal instanceof KaraokeFileScannerImpl) {
             scanCancelSignal.cancel();
         }
@@ -1097,7 +1693,6 @@ public class KaraokeActivity extends BaseActivity {
         final KaraokeFileScanner.CancelSignal signal = scanCancelSignal;
         final boolean recursive = Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true);
 
-        // Unified cache key + signature key, used by CacheManager + Hawk.
         final File folder = new File(folderPath);
         final String cacheKey;
         try {
@@ -1110,17 +1705,14 @@ public class KaraokeActivity extends BaseActivity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                // Quick signature pass — only File metadata, no parsing.
                 final long newSig = KaraokeFileScanner.computeSignature(folder, recursive);
                 final Long oldSig = Hawk.get(sigKey, (Long) null);
 
                 List<KaraokeSong> songs = null;
                 if (oldSig != null && oldSig == newSig) {
-                    // Cache hit — try to restore the library without rescanning.
                     try {
                         Object cached = com.github.tvbox.osc.cache.CacheManager.getCache(cacheKey);
                         if (cached instanceof List) {
-                            //noinspection unchecked
                             songs = (List<KaraokeSong>) cached;
                         }
                     } catch (Throwable ignore) {
@@ -1142,7 +1734,6 @@ public class KaraokeActivity extends BaseActivity {
                     @Override
                     public void run() {
                         if (signal.isCanceled()) return;
-                        // Changing folder resets everything, even when empty
                         session.setLibrary(finalSongs);
                         session.clearQueue();
                         currentPlayingSong = null;
@@ -1163,32 +1754,27 @@ public class KaraokeActivity extends BaseActivity {
                             return;
                         }
 
-                        // Hydrate library with persisted favorite / playback-position info so the
-                        // grid and queue views show heart badges and resume suggestions correctly.
                         for (KaraokeSong s : finalSongs) {
                             try {
-                                com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(s.filePath);
+                                com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(s);
                                 if (h != null) {
                                     s.duration = h.duration;
                                     s.playbackPosition = h.playbackPosition;
                                 }
-                                s.favorite = RoomDataManger.isKaraokeFavorite(s.filePath);
+                                s.favorite = RoomDataManger.isKaraokeFavorite(s);
                             } catch (Throwable ignore) {
                             }
                         }
 
-                        // Setup artist sidebar
                         List<String> artists = new ArrayList<>();
                         artists.add(getString(R.string.karaoke_all_artists));
                         artists.addAll(session.getArtists());
                         artistAdapter.setNewData(artists);
                         artistAdapter.setSelectedPosition(0);
 
-                        // Setup song grid
                         songGridAdapter.setNewDiffData(finalSongs);
                         songGridAdapter.updateQueuedSet(session.getQueue());
 
-                        // Reset to all songs tab
                         switchTab(Tab.ALL);
                         tvTabAll.requestFocus();
                         updateQueueTabCount();
@@ -1198,6 +1784,93 @@ public class KaraokeActivity extends BaseActivity {
                 });
             }
         }).start();
+    }
+
+    private void loadRemoteLibrary(final boolean reset) {
+        if (libraryMode != LibraryMode.REMOTE) return;
+        String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
+        if (apiUrl.isEmpty()) {
+            Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
+            libraryMode = LibraryMode.LOCAL;
+            Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
+            String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+            if (!folder.isEmpty() && new File(folder).exists()) loadFolder(folder);
+            return;
+        }
+
+        if (reset) {
+            apiService.cancelAll();
+            pendingPlayRequestToken++;
+            remoteLoadGeneration++;
+            remoteCursor = null;
+            remoteEndReached = false;
+            remoteLoading = false;
+            session.setLibrary(new ArrayList<KaraokeSong>());
+            activeArtist = null;
+            activeSearch = "";
+            etSearch.setText("");
+            artistAdapter.setSelectedPosition(0);
+            Toast.makeText(mContext, R.string.karaoke_remote_loading, Toast.LENGTH_SHORT).show();
+        }
+        if (remoteEndReached || remoteLoading) return;
+        remoteLoading = true;
+        final int myGeneration = remoteLoadGeneration;
+
+        apiService.listMvs(remoteCursor, 50, new KaraokeApiService.ListCallback() {
+            @Override
+            public void onSuccess(final List<KaraokeSong> songs, final String nextCursor) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (libraryMode != LibraryMode.REMOTE) return;
+                        if (myGeneration != remoteLoadGeneration) return; // stale callback
+                        remoteLoading = false;
+                        remoteCursor = nextCursor;
+                        remoteEndReached = (nextCursor == null);
+                        // Hydrate favorite + resume position from Room so the grid shows
+                        // hearts and resume hints for previously-played / favorited MVs.
+                        for (KaraokeSong s : songs) {
+                            try {
+                                com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(s);
+                                if (h != null) {
+                                    s.duration = h.duration;
+                                    s.playbackPosition = h.playbackPosition;
+                                }
+                                s.favorite = RoomDataManger.isKaraokeFavorite(s);
+                            } catch (Throwable ignore) {
+                            }
+                        }
+                        if (reset) {
+                            session.setLibrary(songs);
+                        } else {
+                            session.appendToLibrary(songs);
+                        }
+                        List<String> artists = new ArrayList<>();
+                        artists.add(getString(R.string.karaoke_all_artists));
+                        artists.addAll(session.getArtists());
+                        artistAdapter.setNewData(artists);
+                        if (reset) artistAdapter.setSelectedPosition(0);
+                        rebuildVisibleSongs();
+                        if (remoteEndReached && !reset) {
+                            Toast.makeText(mContext, R.string.karaoke_remote_no_more, Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onFailure(String msg) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (libraryMode != LibraryMode.REMOTE) return;
+                        if (myGeneration != remoteLoadGeneration) return; // stale callback
+                        remoteLoading = false;
+                        Toast.makeText(mContext, R.string.karaoke_remote_load_failed, Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
     }
 
     /** Concrete CancelSignal implementation so loadFolder can cancel an in-flight scan. */
@@ -1445,12 +2118,37 @@ public class KaraokeActivity extends BaseActivity {
         if (mVideoView != null && currentMode == Mode.PLAY && !userPaused) {
             mVideoView.resume();
         }
+        // Resume the cross-fade carousel only when we're back in audio-only playback
+        // and the user hasn't disabled the toggle.
+        if (bgCarouselView != null
+                && currentMode == Mode.PLAY
+                && currentIsAudioOnly
+                && Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true)) {
+            bgCarouselView.start();
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         setScreenOff();
+        pendingPlayRequestToken++;
+        apiService.cancelAll();
+        apiService.cancelDetail();
+        if (bgCarouselView != null) bgCarouselView.stop();
+        if (mController != null) mController.stopLyricPoll();
+        if (pendingAudioOnlyCheck != null) {
+            mainHandler.removeCallbacks(pendingAudioOnlyCheck);
+            pendingAudioOnlyCheck = null;
+        }
+        if (pendingEmbeddedLyricWatchdog != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+            pendingEmbeddedLyricWatchdog = null;
+        }
+        if (pendingEmbeddedTrackRetry != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+            pendingEmbeddedTrackRetry = null;
+        }
         if (mVideoView != null && currentMode == Mode.PLAY) {
             mVideoView.pause();
             lastPlaybackPosition = mVideoView.getCurrentPosition();
@@ -1461,10 +2159,24 @@ public class KaraokeActivity extends BaseActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        pendingPlayRequestToken++;
+        apiService.cancelAll();
+        apiService.cancelDetail();
         if (scanCancelSignal instanceof KaraokeFileScannerImpl) {
             ((KaraokeFileScannerImpl) scanCancelSignal).cancel();
         }
         if (lyricLoader != null) lyricLoader.cancelAll();
+        if (bgResolver != null) bgResolver.cancelAll();
+        detachEmbeddedLyricListener();
+        if (bgCarouselView != null) bgCarouselView.stop();
+        if (pendingAudioOnlyCheck != null) {
+            mainHandler.removeCallbacks(pendingAudioOnlyCheck);
+            pendingAudioOnlyCheck = null;
+        }
+        if (pendingEmbeddedLyricWatchdog != null) {
+            mainHandler.removeCallbacks(pendingEmbeddedLyricWatchdog);
+            pendingEmbeddedLyricWatchdog = null;
+        }
         if (pendingErrorPlay != null) mainHandler.removeCallbacks(pendingErrorPlay);
         if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
         mainHandler.removeCallbacksAndMessages(null);
@@ -1607,6 +2319,29 @@ public class KaraokeActivity extends BaseActivity {
                     }
                 }
                 return;
+            }
+        }
+        // Fallback for remote tracks matched by identityKey (filePath may be a stream URL snapshot).
+        if (filePath.startsWith("remote:")) {
+            for (KaraokeSong song : session.getLibrary()) {
+                if ("remote".equals(song.sourceType) && filePath.equals(song.identityKey())) {
+                    if (!session.isInQueue(song)) {
+                        session.addToQueue(song);
+                        updateQueueTabCount();
+                        updateStartPlayButton();
+                        if (activeTab == Tab.QUEUE) {
+                            queueAdapter.setNewDiffData(session.getQueue());
+                            queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
+                            updateFocusGraph();
+                        } else {
+                            songGridAdapter.updateQueuedSet(session.getQueue());
+                        }
+                        if (currentMode == Mode.PLAY) {
+                            pushNextUpToController();
+                        }
+                    }
+                    return;
+                }
             }
         }
     }

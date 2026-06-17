@@ -50,6 +50,12 @@ public class KaraokeSession {
         return library;
     }
 
+    public void appendToLibrary(List<KaraokeSong> more) {
+        List<KaraokeSong> combined = new ArrayList<>(library);
+        if (more != null) combined.addAll(more);
+        library = Collections.unmodifiableList(combined);
+    }
+
     public void setFavorites(List<KaraokeSong> songs) {
         favorites = songs != null ? new ArrayList<>(songs) : new ArrayList<>();
     }

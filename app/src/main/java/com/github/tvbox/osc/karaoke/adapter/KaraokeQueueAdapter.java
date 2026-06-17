@@ -37,8 +37,7 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
 
         @Override
         public boolean areItemsTheSame(KaraokeSong oldItem, KaraokeSong newItem) {
-            return oldItem != null && newItem != null
-                    && oldItem.filePath != null && oldItem.filePath.equals(newItem.filePath);
+            return oldItem != null && newItem != null && oldItem.equals(newItem);
         }
 
         @Override
@@ -79,7 +78,6 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
         ImageView ivPlaying = helper.getView(R.id.ivPlaying);
         ivPlaying.setVisibility(pos == currentlyPlayingIndex ? View.VISIBLE : View.INVISIBLE);
 
-        // Main content area = "play" target. D-pad OK on this row plays the song.
         View itemMain = helper.getView(R.id.itemMain);
         if (itemMain != null) {
             itemMain.setOnClickListener(new View.OnClickListener() {
@@ -119,7 +117,6 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
         });
         ivDelete.setOnFocusChangeListener(KaraokeFocusHelper.listFocusListener());
 
-        // Keep touch long-press as a fallback delete affordance on the empty padding area.
         View itemView = helper.getConvertView();
         itemView.setOnLongClickListener(new View.OnLongClickListener() {
             @Override
@@ -139,20 +136,26 @@ public class KaraokeQueueAdapter extends BaseQuickAdapter<KaraokeSong, BaseViewH
         if (currentlyPlayingIndex >= 0 && currentlyPlayingIndex < getData().size()) notifyItemChanged(currentlyPlayingIndex);
     }
 
-    /** Replaces the dataset using DiffUtil so D-pad focus position is preserved. */
     public void setNewDiffData(List<KaraokeSong> list) {
         setNewDiffData(new KaraokeQueueDiffCallback(list != null ? list : new java.util.ArrayList<KaraokeSong>()));
     }
 
-    /** Notify only rows whose underlying song matches the given path (e.g. favorite toggle). */
-    public void notifyFavoriteChanged(String filePath) {
-        if (filePath == null) return;
+    public void notifyFavoriteChanged(KaraokeSong song) {
+        if (song == null) return;
         int n = getData() == null ? 0 : getData().size();
         for (int i = 0; i < n; i++) {
             KaraokeSong item = getItem(i);
-            if (item != null && filePath.equals(item.filePath)) {
+            if (item != null && item.equals(song)) {
                 notifyItemChanged(i);
             }
         }
+    }
+
+    public void notifyFavoriteChanged(String filePath) {
+        if (filePath == null) return;
+        KaraokeSong stub = new KaraokeSong();
+        stub.sourceType = "local";
+        stub.filePath = filePath;
+        notifyFavoriteChanged(stub);
     }
 }

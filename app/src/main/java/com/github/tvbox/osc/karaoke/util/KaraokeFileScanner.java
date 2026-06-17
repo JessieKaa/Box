@@ -110,7 +110,11 @@ public class KaraokeFileScanner {
         int dot = name.lastIndexOf('.');
         if (dot < 0) return false;
         String ext = name.substring(dot + 1);
-        return StorageDriveType.isVideoType(ext);
+        // Karaoke library accepts both video containers and karaoke audio containers
+        // (MKA / FLAC / etc.). DriveActivity / DriveAdapter continue to use the
+        // stricter StorageDriveType.isVideoType so the drive browser doesn't start
+        // showing audio files as videos.
+        return StorageDriveType.isVideoType(ext) || StorageDriveType.isKaraokeAudioType(ext);
     }
 
     private static KaraokeSong parseSong(File file) {
@@ -170,6 +174,8 @@ public class KaraokeFileScanner {
         song.displayName = song.artist != null && !song.artist.isEmpty()
                 ? song.artist + " - " + song.title
                 : song.title;
+        song.sourceType = "local";
+        song.identityKey = "local:" + song.filePath;
         return song;
     }
 }

@@ -77,6 +77,11 @@ public class HawkConfig {
     public static final String KARAOKE_FOLDER = "karaoke_folder";
     public static final String KARAOKE_SCAN_RECURSIVE = "karaoke_scan_recursive"; // default true
     public static final String KARAOKE_LYRIC_ENABLED = "karaoke_lyric_enabled";   // default true
+    public static final String KARAOKE_FULLSCREEN_LYRIC = "karaoke_fullscreen_lyric"; // default true, audio-only
+    public static final String KARAOKE_BG_CAROUSEL = "karaoke_bg_carousel";           // default true, audio-only
+    public static final String KARAOKE_LIBRARY_MODE = "karaoke_library_mode";       // "local" / "remote", default "local"
+    public static final String KARAOKE_API_URL = "karaoke_api_url";                 // default ""
+    public static final String KARAOKE_API_HISTORY = "karaoke_api_history";         // List<String>
 
     public static boolean isDebug() {
         return Hawk.get(DEBUG_OPEN, false);

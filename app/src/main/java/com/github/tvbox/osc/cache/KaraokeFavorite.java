@@ -7,7 +7,7 @@ import androidx.room.PrimaryKey;
 
 import java.io.Serializable;
 
-@Entity(tableName = "karaokeFavorite", indices = {@Index(value = "filePath", unique = true)})
+@Entity(tableName = "karaokeFavorite", indices = {@Index(value = "identityKey", unique = true)})
 public class KaraokeFavorite implements Serializable {
     @PrimaryKey(autoGenerate = true)
     public int id;
@@ -35,4 +35,19 @@ public class KaraokeFavorite implements Serializable {
 
     @ColumnInfo(name = "favoritedAt")
     public long favoritedAt;
+
+    @ColumnInfo(name = "identityKey")
+    public String identityKey;
+
+    @ColumnInfo(name = "trackId")
+    public String trackId;
+
+    @ColumnInfo(name = "sourceType")
+    public String sourceType;
+
+    @ColumnInfo(name = "streamUrl")
+    public String streamUrl;
+
+    @ColumnInfo(name = "artworkUrl")
+    public String artworkUrl;
 }

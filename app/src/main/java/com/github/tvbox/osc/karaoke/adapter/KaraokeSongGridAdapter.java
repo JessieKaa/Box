@@ -32,8 +32,7 @@ public class KaraokeSongGridAdapter extends BaseQuickAdapter<KaraokeSong, BaseVi
 
         @Override
         public boolean areItemsTheSame(KaraokeSong oldItem, KaraokeSong newItem) {
-            return oldItem != null && newItem != null
-                    && oldItem.filePath != null && oldItem.filePath.equals(newItem.filePath);
+            return oldItem != null && newItem != null && oldItem.equals(newItem);
         }
 
         @Override
@@ -70,8 +69,6 @@ public class KaraokeSongGridAdapter extends BaseQuickAdapter<KaraokeSong, BaseVi
             tvQueued.setVisibility(View.GONE);
         }
 
-        // The favorite heart is always visible so users can *add* favorites from
-        // the All/Favorites grids, not just toggle them off. Only the drawable flips.
         ImageView ivFavorite = helper.getView(R.id.ivFavorite);
         if (ivFavorite != null) {
             ivFavorite.setVisibility(View.VISIBLE);
@@ -90,12 +87,6 @@ public class KaraokeSongGridAdapter extends BaseQuickAdapter<KaraokeSong, BaseVi
         itemView.setOnFocusChangeListener(KaraokeFocusHelper.gridFocusListener());
     }
 
-    /**
-     * Replaces the queued set and notifies only the rows whose queued state actually
-     * flipped. Calling {@code notifyDataSetChanged()} here resets D-pad focus on every
-     * queue mutation, which is exactly what the plan's DiffUtil requirement was meant
-     * to prevent.
-     */
     public void updateQueuedSet(KaraokeSession session) {
         updateQueuedSet(session != null ? session.getQueue() : null);
     }
@@ -116,19 +107,25 @@ public class KaraokeSongGridAdapter extends BaseQuickAdapter<KaraokeSong, BaseVi
         }
     }
 
-    /** Notify only rows whose underlying song matches the given path (e.g. favorite toggle). */
-    public void notifyFavoriteChanged(String filePath) {
-        if (filePath == null) return;
+    public void notifyFavoriteChanged(KaraokeSong song) {
+        if (song == null) return;
         int n = getData() == null ? 0 : getData().size();
         for (int i = 0; i < n; i++) {
             KaraokeSong item = getItem(i);
-            if (item != null && filePath.equals(item.filePath)) {
+            if (item != null && item.equals(song)) {
                 notifyItemChanged(i);
             }
         }
     }
 
-    /** Replaces the dataset using DiffUtil so D-pad focus position is preserved. */
+    public void notifyFavoriteChanged(String filePath) {
+        if (filePath == null) return;
+        KaraokeSong stub = new KaraokeSong();
+        stub.sourceType = "local";
+        stub.filePath = filePath;
+        notifyFavoriteChanged(stub);
+    }
+
     public void setNewDiffData(List<KaraokeSong> list) {
         setNewDiffData(new KaraokeSongDiffCallback(list != null ? list : new ArrayList<KaraokeSong>()));
     }
