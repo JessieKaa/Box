@@ -32,6 +32,9 @@ import com.github.tvbox.osc.cache.RoomDataManger;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeArtistAdapter;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeQueueAdapter;
 import com.github.tvbox.osc.karaoke.adapter.KaraokeSongGridAdapter;
+import com.github.tvbox.osc.karaoke.discovery.KaraokeDiscoveredServer;
+import com.github.tvbox.osc.karaoke.discovery.KaraokeDiscoveryManager;
+import com.github.tvbox.osc.karaoke.discovery.KaraokeDiscoveryStore;
 import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 import com.github.tvbox.osc.karaoke.controller.KaraokeController;
 import com.github.tvbox.osc.karaoke.lyric.KaraokeFullLyricView;
@@ -86,7 +89,10 @@ public class KaraokeActivity extends BaseActivity {
     private String remoteCursor = null;
     private boolean remoteLoading = false;
     private boolean remoteEndReached = false;
+    private boolean discoveryPending = false;
+    private boolean remoteRefreshAfterDiscovery = false;
     private final KaraokeApiService apiService = KaraokeApiService.get();
+    private KaraokeDiscoveryManager discoveryManager;
     private int pendingPlayRequestToken = 0;
     private int remoteLoadGeneration = 0;
     private KaraokeSong currentPlayingSong = null;
@@ -170,6 +176,7 @@ public class KaraokeActivity extends BaseActivity {
         session = new KaraokeSession();
         lyricLoader = new KaraokeLyricLoader(this);
         bgResolver = new KaraokeBgImageResolver();
+        discoveryManager = new KaraokeDiscoveryManager(this);
 
         // Video player setup
         mVideoView = findViewById(R.id.mVideoView);
@@ -284,20 +291,13 @@ public class KaraokeActivity extends BaseActivity {
         // Load saved folder or pick one
         String modeValue = Hawk.get(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
         libraryMode = "remote".equals(modeValue) ? LibraryMode.REMOTE : LibraryMode.LOCAL;
+        boolean hasEffectiveRemote = KaraokeDiscoveryStore.recomputeEffectiveEndpoint(false);
         if (libraryMode == LibraryMode.REMOTE) {
-            String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
-            if (apiUrl.isEmpty()) {
-                Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
-                libraryMode = LibraryMode.LOCAL;
-                Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
-                String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-                if (!savedFolder.isEmpty() && new File(savedFolder).exists()) {
-                    loadFolder(savedFolder);
-                } else {
-                    openFolderPicker();
-                }
-            } else {
+            if (hasEffectiveRemote) {
                 loadRemoteLibrary(true);
+                startDiscovery(false, false);
+            } else {
+                startDiscovery(true, true);
             }
         } else {
             String savedFolder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
@@ -1389,7 +1389,7 @@ public class KaraokeActivity extends BaseActivity {
         final String optMode = formatMode(R.string.karaoke_settings_library_mode,
                 libraryMode == LibraryMode.REMOTE);
         final String optApiUrl = getString(R.string.karaoke_settings_api_url) + ": " +
-                abbreviate(Hawk.get(HawkConfig.KARAOKE_API_URL, ""));
+                remoteApiSummary();
         final String[] items = new String[] { optRecursive, optLyric, optFullscreenLyric, optBgCarousel, optRescan, optMode, optApiUrl };
         final boolean[] state = new boolean[] {
                 Hawk.get(HawkConfig.KARAOKE_SCAN_RECURSIVE, true),
@@ -1467,63 +1467,22 @@ public class KaraokeActivity extends BaseActivity {
                         bgGeneration++;
                     }
                 } else if (pos == 4) {
-                    String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-                    if (!folder.isEmpty() && new File(folder).exists()) {
-                        stopPlaybackAndReturnToSelect();
-                        loadFolder(folder);
-                    } else {
-                        Toast.makeText(mContext, getString(R.string.karaoke_error_no_folder), Toast.LENGTH_SHORT).show();
-                    }
+                    remoteReloadFolder();
                 } else if (pos == 5) {
                     LibraryMode newMode = libraryMode == LibraryMode.LOCAL ? LibraryMode.REMOTE : LibraryMode.LOCAL;
-                    if (newMode == LibraryMode.REMOTE) {
-                        String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
-                        if (apiUrl.isEmpty()) {
-                            Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
-                            return;
-                        }
-                    }
-                    libraryMode = newMode;
-                    Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, libraryMode == LibraryMode.REMOTE ? "remote" : "local");
-                    stopPlaybackAndReturnToSelect();
-                    pendingPlayRequestToken++;
-                    apiService.cancelAll();
-                    apiService.cancelDetail();
-                    session.clearQueue();
-                    activeArtist = null;
-                    activeSearch = "";
-                    etSearch.setText("");
-                    artistAdapter.setSelectedPosition(0);
-                    if (libraryMode == LibraryMode.REMOTE) {
-                        loadRemoteLibrary(true);
-                    } else {
-                        String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-                        if (!folder.isEmpty() && new File(folder).exists()) {
-                            loadFolder(folder);
-                        } else {
-                            openFolderPicker();
-                        }
-                    }
+                    switchLibraryMode(newMode);
                 } else if (pos == 6) {
                     KaraokeApiUrlDialog urlDialog = new KaraokeApiUrlDialog(KaraokeActivity.this);
                     urlDialog.setOnListener(new KaraokeApiUrlDialog.OnListener() {
                         @Override
                         public void onchange(String url) {
-                            // Cleared URL while in remote mode → fall back to local and
-                            // tear down any in-flight remote state.
-                            if (libraryMode == LibraryMode.REMOTE && (url == null || url.isEmpty())) {
-                                libraryMode = LibraryMode.LOCAL;
-                                Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
-                                stopPlaybackAndReturnToSelect();
-                                pendingPlayRequestToken++;
-                                apiService.cancelAll();
-                                apiService.cancelDetail();
-                                session.clearQueue();
-                                String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-                                if (!folder.isEmpty() && new File(folder).exists()) {
-                                    loadFolder(folder);
+                            if (libraryMode == LibraryMode.REMOTE) {
+                                boolean hasEffectiveRemote = KaraokeDiscoveryStore.recomputeEffectiveEndpoint(false);
+                                if (hasEffectiveRemote) {
+                                    loadRemoteLibrary(true);
+                                    startDiscovery(false, false);
                                 } else {
-                                    openFolderPicker();
+                                    startDiscovery(true, true);
                                 }
                             }
                         }
@@ -1548,6 +1507,109 @@ public class KaraokeActivity extends BaseActivity {
             }
         }, data, 0);
         dialog.show();
+    }
+
+
+    private void startDiscovery(final boolean reloadRemoteAfterSuccess, final boolean fallbackToLocalOnFailure) {
+        if (libraryMode != LibraryMode.REMOTE || discoveryManager == null) return;
+        boolean shouldReload = remoteRefreshAfterDiscovery || reloadRemoteAfterSuccess;
+        boolean shouldFallback = fallbackToLocalOnFailure;
+        if (discoveryPending) {
+            remoteRefreshAfterDiscovery = shouldReload;
+            return;
+        }
+        discoveryPending = true;
+        remoteRefreshAfterDiscovery = shouldReload;
+        Toast.makeText(mContext, R.string.karaoke_remote_discovery_pending, Toast.LENGTH_SHORT).show();
+        discoveryManager.startScan(new KaraokeDiscoveryManager.ScanCallback() {
+            @Override
+            public void onScanStarted() {
+            }
+
+            @Override
+            public void onServersChanged(List<KaraokeDiscoveredServer> servers) {
+            }
+
+            @Override
+            public void onScanFinished(List<KaraokeDiscoveredServer> servers, boolean success, String error) {
+                discoveryPending = false;
+                boolean ready = KaraokeDiscoveryStore.recomputeEffectiveEndpoint(false);
+                if (ready) {
+                    if (remoteRefreshAfterDiscovery) {
+                        remoteRefreshAfterDiscovery = false;
+                        loadRemoteLibrary(true);
+                    }
+                    return;
+                }
+                remoteRefreshAfterDiscovery = false;
+                if (fallbackToLocalOnFailure && shouldFallback) {
+                    fallbackToLocalLibrary();
+                } else {
+                    Toast.makeText(mContext, R.string.karaoke_remote_discovery_failed, Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+    }
+
+    private void fallbackToLocalLibrary() {
+        discoveryPending = false;
+        remoteRefreshAfterDiscovery = false;
+        libraryMode = LibraryMode.LOCAL;
+        Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
+        KaraokeDiscoveryStore.clearEffectiveEndpoint();
+        String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+        if (!folder.isEmpty() && new File(folder).exists()) {
+            loadFolder(folder);
+        } else {
+            openFolderPicker();
+        }
+    }
+
+    private void switchLibraryMode(LibraryMode newMode) {
+        if (libraryMode == newMode) return;
+        libraryMode = newMode;
+        Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, libraryMode == LibraryMode.REMOTE ? "remote" : "local");
+        stopPlaybackAndReturnToSelect();
+        pendingPlayRequestToken++;
+        apiService.cancelAll();
+        apiService.cancelDetail();
+        session.clearQueue();
+        activeArtist = null;
+        activeSearch = "";
+        etSearch.setText("");
+        artistAdapter.setSelectedPosition(0);
+        if (libraryMode == LibraryMode.REMOTE) {
+            boolean hasEffectiveRemote = KaraokeDiscoveryStore.recomputeEffectiveEndpoint(false);
+            if (hasEffectiveRemote) {
+                loadRemoteLibrary(true);
+                startDiscovery(false, false);
+            } else {
+                startDiscovery(true, true);
+            }
+        } else {
+            if (discoveryManager != null) discoveryManager.stopScan();
+            String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+            if (!folder.isEmpty() && new File(folder).exists()) {
+                loadFolder(folder);
+            } else {
+                openFolderPicker();
+            }
+        }
+    }
+
+    private String remoteApiSummary() {
+        String mode = Hawk.get(HawkConfig.KARAOKE_SERVER_SELECTION_MODE, "manual");
+        if ("discovered".equals(mode)) {
+            KaraokeDiscoveredServer server = KaraokeDiscoveryStore.findServerById(Hawk.get(HawkConfig.KARAOKE_SELECTED_SERVER_ID, ""));
+            if (server != null) {
+                return abbreviate(server.displayName());
+            }
+        }
+        String active = Hawk.get(HawkConfig.KARAOKE_MANUAL_API_URL, "");
+        if (active == null || active.isEmpty()) {
+            active = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
+        }
+        return abbreviate(active);
     }
 
     private String formatToggle(int resId, boolean on) {
@@ -1605,14 +1667,18 @@ public class KaraokeActivity extends BaseActivity {
     // ======================== Remote Reload ========================
 
     void remoteReloadFolder() {
-        String folderPath = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-        if (folderPath.isEmpty() || !new File(folderPath).exists()) {
-            return;
-        }
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 stopPlaybackAndReturnToSelect();
+                if (libraryMode == LibraryMode.REMOTE) {
+                    startDiscovery(true, true);
+                    return;
+                }
+                String folderPath = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
+                if (folderPath.isEmpty() || !new File(folderPath).exists()) {
+                    return;
+                }
                 loadFolder(folderPath);
             }
         });
@@ -1788,13 +1854,10 @@ public class KaraokeActivity extends BaseActivity {
 
     private void loadRemoteLibrary(final boolean reset) {
         if (libraryMode != LibraryMode.REMOTE) return;
+        boolean hasEffectiveRemote = KaraokeDiscoveryStore.recomputeEffectiveEndpoint(false);
         String apiUrl = Hawk.get(HawkConfig.KARAOKE_API_URL, "");
-        if (apiUrl.isEmpty()) {
-            Toast.makeText(mContext, R.string.karaoke_remote_no_url, Toast.LENGTH_SHORT).show();
-            libraryMode = LibraryMode.LOCAL;
-            Hawk.put(HawkConfig.KARAOKE_LIBRARY_MODE, "local");
-            String folder = Hawk.get(HawkConfig.KARAOKE_FOLDER, "");
-            if (!folder.isEmpty() && new File(folder).exists()) loadFolder(folder);
+        if (!hasEffectiveRemote || apiUrl.isEmpty()) {
+            startDiscovery(reset, true);
             return;
         }
 
@@ -1812,7 +1875,7 @@ public class KaraokeActivity extends BaseActivity {
             artistAdapter.setSelectedPosition(0);
             Toast.makeText(mContext, R.string.karaoke_remote_loading, Toast.LENGTH_SHORT).show();
         }
-        if (remoteEndReached || remoteLoading) return;
+        if (remoteEndReached || remoteLoading || discoveryPending) return;
         remoteLoading = true;
         final int myGeneration = remoteLoadGeneration;
 
@@ -1823,12 +1886,10 @@ public class KaraokeActivity extends BaseActivity {
                     @Override
                     public void run() {
                         if (libraryMode != LibraryMode.REMOTE) return;
-                        if (myGeneration != remoteLoadGeneration) return; // stale callback
+                        if (myGeneration != remoteLoadGeneration) return;
                         remoteLoading = false;
                         remoteCursor = nextCursor;
                         remoteEndReached = (nextCursor == null);
-                        // Hydrate favorite + resume position from Room so the grid shows
-                        // hearts and resume hints for previously-played / favorited MVs.
                         for (KaraokeSong s : songs) {
                             try {
                                 com.github.tvbox.osc.cache.KaraokeHistory h = RoomDataManger.getKaraokeHistory(s);
@@ -1864,9 +1925,19 @@ public class KaraokeActivity extends BaseActivity {
                     @Override
                     public void run() {
                         if (libraryMode != LibraryMode.REMOTE) return;
-                        if (myGeneration != remoteLoadGeneration) return; // stale callback
+                        if (myGeneration != remoteLoadGeneration) return;
                         remoteLoading = false;
-                        Toast.makeText(mContext, R.string.karaoke_remote_load_failed, Toast.LENGTH_SHORT).show();
+                        apiService.checkHealth(new KaraokeApiService.HealthCallback() {
+                            @Override
+                            public void onSuccess() {
+                                Toast.makeText(mContext, R.string.karaoke_remote_load_failed, Toast.LENGTH_SHORT).show();
+                            }
+
+                            @Override
+                            public void onFailure(String msg) {
+                                startDiscovery(true, true);
+                            }
+                        });
                     }
                 });
             }
@@ -2118,13 +2189,14 @@ public class KaraokeActivity extends BaseActivity {
         if (mVideoView != null && currentMode == Mode.PLAY && !userPaused) {
             mVideoView.resume();
         }
-        // Resume the cross-fade carousel only when we're back in audio-only playback
-        // and the user hasn't disabled the toggle.
         if (bgCarouselView != null
                 && currentMode == Mode.PLAY
                 && currentIsAudioOnly
                 && Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true)) {
             bgCarouselView.start();
+        }
+        if (libraryMode == LibraryMode.REMOTE && !discoveryPending) {
+            startDiscovery(false, false);
         }
     }
 
@@ -2135,6 +2207,7 @@ public class KaraokeActivity extends BaseActivity {
         pendingPlayRequestToken++;
         apiService.cancelAll();
         apiService.cancelDetail();
+        if (discoveryManager != null) discoveryManager.stopScan();
         if (bgCarouselView != null) bgCarouselView.stop();
         if (mController != null) mController.stopLyricPoll();
         if (pendingAudioOnlyCheck != null) {
@@ -2162,6 +2235,7 @@ public class KaraokeActivity extends BaseActivity {
         pendingPlayRequestToken++;
         apiService.cancelAll();
         apiService.cancelDetail();
+        if (discoveryManager != null) discoveryManager.stopScan();
         if (scanCancelSignal instanceof KaraokeFileScannerImpl) {
             ((KaraokeFileScannerImpl) scanCancelSignal).cancel();
         }

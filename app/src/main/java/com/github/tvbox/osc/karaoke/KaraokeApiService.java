@@ -3,9 +3,12 @@ package com.github.tvbox.osc.karaoke;
 import com.github.tvbox.osc.karaoke.bean.KaraokeSong;
 import com.github.tvbox.osc.karaoke.bean.KaraokeTrack;
 import com.github.tvbox.osc.karaoke.bean.KaraokeTrackListResponse;
+import com.github.tvbox.osc.karaoke.discovery.KaraokeDiscoveryStore;
 import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.urlhttp.OkHttpUtil;
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.orhanobut.hawk.Hawk;
 
 import java.net.URLEncoder;
@@ -18,6 +21,7 @@ public class KaraokeApiService {
 
     private static final String TAG = "karaoke_remote";
     private static final String DETAIL_TAG = "karaoke_remote_detail";
+    private static final String HEALTH_TAG = "karaoke_remote_health";
     private static final Gson GSON = new Gson();
     private static volatile KaraokeApiService instance;
 
@@ -28,6 +32,11 @@ public class KaraokeApiService {
 
     public interface DetailCallback {
         void onSuccess(KaraokeSong song);
+        void onFailure(String msg);
+    }
+
+    public interface HealthCallback {
+        void onSuccess();
         void onFailure(String msg);
     }
 
@@ -45,25 +54,34 @@ public class KaraokeApiService {
         return instance;
     }
 
-    private String baseUrl() {
-        return Hawk.get(HawkConfig.KARAOKE_API_URL, "").trim();
+    private String baseOrigin() {
+        return KaraokeDiscoveryStore.stripTrailingSlash(Hawk.get(HawkConfig.KARAOKE_API_URL, "").trim());
+    }
+
+    private String apiPath() {
+        return KaraokeDiscoveryStore.normalizeApiPath(Hawk.get(HawkConfig.KARAOKE_API_PATH, "/api"));
+    }
+
+    private String resourceBaseUrl() {
+        return KaraokeDiscoveryStore.buildResourceBaseUrl(baseOrigin(), apiPath());
     }
 
     public void listMvs(String cursor, int limit, ListCallback cb) {
-        String base = baseUrl();
+        String base = baseOrigin();
         if (base.isEmpty()) {
             if (cb != null) cb.onFailure("empty url");
             return;
         }
-        final String finalBase = stripTrailingSlash(base);
+        final String listUrlBase = KaraokeDiscoveryStore.buildEndpoint(base, apiPath(), "/v1/library/tracks");
+        final String finalResourceBase = resourceBaseUrl();
         final String finalCursor = cursor;
         final int finalLimit = Math.max(1, Math.min(limit, 200));
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    StringBuilder sb = new StringBuilder(finalBase);
-                    sb.append("/api/v1/library/tracks?media_type=mv");
+                    StringBuilder sb = new StringBuilder(listUrlBase);
+                    sb.append("?media_type=mv");
                     sb.append("&limit=").append(finalLimit);
                     if (finalCursor != null && !finalCursor.isEmpty()) {
                         sb.append("&cursor=").append(URLEncoder.encode(finalCursor, "UTF-8"));
@@ -82,7 +100,7 @@ public class KaraokeApiService {
                     }
                     List<KaraokeSong> songs = new ArrayList<>();
                     for (KaraokeTrack t : resp.items) {
-                        KaraokeSong s = t != null ? t.toKaraokeSong(finalBase) : null;
+                        KaraokeSong s = t != null ? t.toKaraokeSong(finalResourceBase) : null;
                         if (s != null) songs.add(s);
                     }
                     postSuccess(cb, songs, resp.next_cursor);
@@ -94,7 +112,7 @@ public class KaraokeApiService {
     }
 
     public void getTrackDetail(String trackId, DetailCallback cb) {
-        String base = baseUrl();
+        String base = baseOrigin();
         if (base.isEmpty()) {
             if (cb != null) cb.onFailure("empty url");
             return;
@@ -103,13 +121,12 @@ public class KaraokeApiService {
             if (cb != null) cb.onFailure("empty track id");
             return;
         }
-        final String finalBase = stripTrailingSlash(base);
-        final String finalTrackId = trackId;
+        final String url = KaraokeDiscoveryStore.buildEndpoint(base, apiPath(), "/v1/library/tracks/" + urlEncode(trackId));
+        final String finalResourceBase = resourceBaseUrl();
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    String url = finalBase + "/api/v1/library/tracks/" + URLEncoder.encode(finalTrackId, "UTF-8");
                     OkHttpClient client = com.github.tvbox.osc.util.OkGoHelper.getDefaultClient();
                     String body = OkHttpUtil.string(client, url, DETAIL_TAG, null, null, null);
                     if (body == null || body.isEmpty()) {
@@ -121,7 +138,7 @@ public class KaraokeApiService {
                         postFailure(cb, "invalid track");
                         return;
                     }
-                    KaraokeSong song = track.toKaraokeSong(finalBase);
+                    KaraokeSong song = track.toKaraokeSong(finalResourceBase);
                     if (song == null) {
                         postFailure(cb, "invalid track");
                         return;
@@ -134,28 +151,56 @@ public class KaraokeApiService {
         }).start();
     }
 
+    public void checkHealth(HealthCallback cb) {
+        String base = baseOrigin();
+        if (base.isEmpty()) {
+            if (cb != null) cb.onFailure("empty url");
+            return;
+        }
+        final String url = KaraokeDiscoveryStore.buildEndpoint(base, apiPath(), "/health");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    OkHttpClient client = com.github.tvbox.osc.util.OkGoHelper.getDefaultClient();
+                    String body = OkHttpUtil.string(client, url, HEALTH_TAG, null, null, null);
+                    if (!isHealthOk(body)) {
+                        postFailure(cb, "health failed");
+                        return;
+                    }
+                    postSuccess(cb);
+                } catch (Exception e) {
+                    postFailure(cb, e.getMessage() != null ? e.getMessage() : e.toString());
+                }
+            }
+        }).start();
+    }
+
     public void searchMvs(String query, int offset, int limit, ListCallback cb) {
         throw new UnsupportedOperationException("remote search not implemented in phase 1");
     }
 
     public void cancelAll() {
-        // Cancels in-flight list/pagination requests only. Detail-refresh requests
-        // use DETAIL_TAG so they survive pagination/reset — they're already guarded
-        // by the play-request token in KaraokeActivity and would otherwise drop a
-        // stream URL refresh the user is actively waiting on.
         OkHttpUtil.cancel(com.github.tvbox.osc.util.OkGoHelper.getDefaultClient(), TAG);
+        OkHttpUtil.cancel(com.github.tvbox.osc.util.OkGoHelper.getDefaultClient(), HEALTH_TAG);
     }
 
     public void cancelDetail() {
         OkHttpUtil.cancel(com.github.tvbox.osc.util.OkGoHelper.getDefaultClient(), DETAIL_TAG);
     }
 
-    private String stripTrailingSlash(String url) {
-        if (url == null) return "";
-        while (url.endsWith("/")) {
-            url = url.substring(0, url.length() - 1);
+    private String urlEncode(String value) throws Exception {
+        return URLEncoder.encode(value, "UTF-8");
+    }
+
+    private boolean isHealthOk(String body) {
+        if (body == null || body.trim().isEmpty()) return false;
+        try {
+            JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+            return json.has("status") && "ok".equalsIgnoreCase(json.get("status").getAsString());
+        } catch (Throwable e) {
+            return body.contains("\"status\":\"ok\"");
         }
-        return url;
     }
 
     private void postSuccess(final ListCallback cb, final List<KaraokeSong> songs, final String nextCursor) {
@@ -192,6 +237,28 @@ public class KaraokeApiService {
     }
 
     private void postFailure(final DetailCallback cb, final String msg) {
+        if (cb == null) return;
+        android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onFailure(msg);
+            }
+        });
+    }
+
+    private void postSuccess(final HealthCallback cb) {
+        if (cb == null) return;
+        android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.post(new Runnable() {
+            @Override
+            public void run() {
+                cb.onSuccess();
+            }
+        });
+    }
+
+    private void postFailure(final HealthCallback cb, final String msg) {
         if (cb == null) return;
         android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         h.post(new Runnable() {

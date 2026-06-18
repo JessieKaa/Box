@@ -80,7 +80,13 @@ public class HawkConfig {
     public static final String KARAOKE_FULLSCREEN_LYRIC = "karaoke_fullscreen_lyric"; // default true, audio-only
     public static final String KARAOKE_BG_CAROUSEL = "karaoke_bg_carousel";           // default true, audio-only
     public static final String KARAOKE_LIBRARY_MODE = "karaoke_library_mode";       // "local" / "remote", default "local"
-    public static final String KARAOKE_API_URL = "karaoke_api_url";                 // default ""
+    public static final String KARAOKE_API_URL = "karaoke_api_url";                 // active base origin
+    public static final String KARAOKE_API_PATH = "karaoke_api_path";               // active api path, default /api
+    public static final String KARAOKE_MANUAL_API_URL = "karaoke_manual_api_url";   // full manual url including optional /api path
+    public static final String KARAOKE_SERVER_SELECTION_MODE = "karaoke_server_selection_mode"; // manual / discovered
+    public static final String KARAOKE_SELECTED_SERVER_ID = "karaoke_selected_server_id";
+    public static final String KARAOKE_DISCOVERED_SERVERS = "karaoke_discovered_servers";
+    public static final String KARAOKE_DISCOVERY_LAST_SCAN_AT = "karaoke_discovery_last_scan_at";
     public static final String KARAOKE_API_HISTORY = "karaoke_api_history";         // List<String>
 
     public static boolean isDebug() {

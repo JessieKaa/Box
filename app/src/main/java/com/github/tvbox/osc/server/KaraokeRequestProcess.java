@@ -391,9 +391,12 @@ public class KaraokeRequestProcess implements RequestProcess {
     }
 
     private NanoHTTPD.Response doRescan() {
-        File folder = getKaraokeFolder();
-        if (folder == null || !folder.exists() || !folder.isDirectory()) {
-            return errorResponse("未设置卡拉OK文件夹");
+        String mode = Hawk.get("karaoke_library_mode", "local");
+        if (!"remote".equals(mode)) {
+            File folder = getKaraokeFolder();
+            if (folder == null || !folder.exists() || !folder.isDirectory()) {
+                return errorResponse("未设置卡拉OK文件夹");
+            }
         }
         if (!KaraokeRemoteManager.get().triggerRescan()) {
             return errorResponse("TV未连接，无法刷新曲库。下次打开卡拉OK时会自动扫描");

@@ -64,6 +64,10 @@
     <string name="karaoke_remote_loading">Loading online library…</string>
     <string name="karaoke_remote_load_failed">Failed to load online library</string>
     <string name="karaoke_remote_no_url">Please set online library URL first</string>
+    <string name="karaoke_remote_discovery_pending">Discovering online library…</string>
+    <string name="karaoke_remote_discovery_failed">No compatible online library found</string>
+    <string name="karaoke_remote_invalid_url">Invalid online library URL</string>
+    <string name="karaoke_remote_health_failed">Online library health check failed</string>
     <string name="karaoke_remote_no_stream">Stream URL not available</string>
     <string name="karaoke_remote_no_more">No more tracks</string>
     <string name="dialog_karaoke_api_url_title">Online library URL</string>
