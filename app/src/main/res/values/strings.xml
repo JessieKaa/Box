@@ -78,6 +78,13 @@
     <string name="karaoke_error_disk_full">Not enough space to upload file</string>
     <string name="karaoke_upload_progress">Uploading… %d%%</string>
     <string name="karaoke_upload_done">Upload complete</string>
+    <string name="karaoke_toast_playing">Playing</string>
+    <string name="karaoke_toast_paused">Paused</string>
+    <string name="karaoke_toast_track_switched">Switched to: %1$s</string>
+    <string name="karaoke_toast_no_multi_track">This song has no alternate audio tracks</string>
+    <string name="karaoke_toast_prev_song">Previous: %1$s</string>
+    <string name="karaoke_toast_next_song">Next: %1$s</string>
+    <string name="karaoke_toast_no_more_songs">No more songs</string>
     <string name="hm_style_line">Line View</string>
     <string name="hm_style_grid">Grid View</string>
     <string name="hm_hist_del">Removed from History</string>
