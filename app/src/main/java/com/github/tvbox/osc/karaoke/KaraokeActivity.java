@@ -165,6 +165,29 @@ public class KaraokeActivity extends BaseActivity {
     private String lastMarqueeText = null;
     private String lastTrackInfo = null;
 
+    // marquee/QR 周期显隐 — PLAY 模式下 8s 显 / 7s 隐 循环;暂停强显;DPAD 按键重置。
+    // 复用 mainHandler 做 scheduling,不加新 Handler 字段。
+    private static final long CYCLE_SHOW_MS = 8000L;
+    private static final long CYCLE_HIDE_MS = 7000L;
+    private boolean marqueeCycleActive = false;
+    private boolean pausedForcesShow = false;
+    // 互引用 Runnable 用匿名内部类 —— lambda 会被 JLS §8.3.3 当作简单名前向引用拒绝;
+    // 匿名内部类的 run() 体是独立方法作用域,字段解析在 run() 触发时,此时所有字段已就绪。
+    private final Runnable cycleHideRunnable = new Runnable() {
+        @Override
+        public void run() {
+            hideMarqueeUI();
+            mainHandler.postDelayed(cycleShowRunnable, CYCLE_HIDE_MS);
+        }
+    };
+    private final Runnable cycleShowRunnable = new Runnable() {
+        @Override
+        public void run() {
+            showMarqueeUI();
+            mainHandler.postDelayed(cycleHideRunnable, CYCLE_SHOW_MS);
+        }
+    };
+
     // Select layer views
     private LinearLayout llSelectLayer;
     private EditText etSearch;
@@ -283,9 +306,22 @@ public class KaraokeActivity extends BaseActivity {
                     }
                     scheduleAudioOnlyConservativeCheck();
                     if (currentIsAudioOnly) startLyricPoll();
+                    // 恢复周期:暂停态退出 / 切歌后新歌进入 PLAY,都从 8s 显开始。
+                    if (currentMode == Mode.PLAY) {
+                        pausedForcesShow = false;
+                        if (!marqueeCycleActive) startMarqueeCycle();
+                        else resetMarqueeCycle();
+                    }
                 } else if (playState == VideoView.STATE_PAUSED
                         || playState == VideoView.STATE_IDLE) {
                     stopLyricPoll();
+                    // 暂停 / IDLE 强显 marquee+QR,停周期。继续播放时 STATE_PLAYING 会清此位。
+                    if (currentMode == Mode.PLAY) {
+                        pausedForcesShow = true;
+                        mainHandler.removeCallbacks(cycleShowRunnable);
+                        mainHandler.removeCallbacks(cycleHideRunnable);
+                        showMarqueeUI();
+                    }
                 }
             }
         });
@@ -742,6 +778,59 @@ public class KaraokeActivity extends BaseActivity {
         updatePlayerQRUI();
     }
 
+    // ======================== marquee/QR Cycle ========================
+
+    /**
+     * PLAY 模式下恢复 marquee + QR 显隐。不重画文本 / bitmap —— {@link #updateMarqueeUI} 和
+     * {@link #updatePlayerQRUI} 已经在 {@code enterPlayMode} / {@code pushNextUpToController}
+     * 调用时缓存过,这里只 toggle visibility。
+     */
+    private void showMarqueeUI() {
+        if (currentMode != Mode.PLAY) return;
+        if (marqueeOn && llTopBar != null) llTopBar.setVisibility(View.VISIBLE);
+        if (playerQRVisible && playerQRBitmap != null && llPlayerQR != null) {
+            llPlayerQR.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /** 仅切 view 可见性,不动 marqueeOn / playerQRVisible 业务态。 */
+    private void hideMarqueeUI() {
+        if (llTopBar != null) llTopBar.setVisibility(View.GONE);
+        if (llPlayerQR != null) llPlayerQR.setVisibility(View.GONE);
+    }
+
+    /** 启动周期;幂等。已 active 直接 return,避免双发。 */
+    private void startMarqueeCycle() {
+        if (marqueeCycleActive) return;
+        marqueeCycleActive = true;
+        mainHandler.removeCallbacks(cycleShowRunnable);
+        mainHandler.removeCallbacks(cycleHideRunnable);
+        showMarqueeUI();
+        mainHandler.postDelayed(cycleHideRunnable, CYCLE_SHOW_MS);
+    }
+
+    /** 停周期 + 清 schedule + hide view。SELECT 切换 / 销毁路径调用。 */
+    private void stopMarqueeCycle() {
+        mainHandler.removeCallbacks(cycleShowRunnable);
+        mainHandler.removeCallbacks(cycleHideRunnable);
+        marqueeCycleActive = false;
+        pausedForcesShow = false;
+        hideMarqueeUI();
+    }
+
+    /**
+     * 按键中断 / 切歌时重置:从 show 相位重新开始 8s 倒计时。
+     * 暂停态 (pausedForcesShow) 跳过 —— 强显优先;未启动时跳过 —— 避免 SELECT 期间误触。
+     */
+    private void resetMarqueeCycle() {
+        if (pausedForcesShow) return;
+        if (!marqueeCycleActive) return;
+        mainHandler.removeCallbacks(cycleShowRunnable);
+        mainHandler.removeCallbacks(cycleHideRunnable);
+        showMarqueeUI();
+        mainHandler.postDelayed(cycleHideRunnable, CYCLE_SHOW_MS);
+    }
+
     // ======================== Mode Switching ========================
 
     private void enterSelectMode() {
@@ -792,6 +881,7 @@ public class KaraokeActivity extends BaseActivity {
         setPlayerQRVisible(false);
         marqueeOn = false;
         updateMarqueeUI(null, null);
+        stopMarqueeCycle();
 
         updateNowPlayingText();
         updateStartPlayButton();
@@ -848,6 +938,7 @@ public class KaraokeActivity extends BaseActivity {
             // Re-evaluate audio-only UI in case the toggle changed while paused
             applyAudioOnlyUi(currentIsAudioOnly);
             startLyricForSong(currentPlayingSong);
+            startMarqueeCycle();
             return;
         }
 
@@ -863,6 +954,7 @@ public class KaraokeActivity extends BaseActivity {
             setSongTitle(song.displayName);
             pushNextUpToController();
         }
+        startMarqueeCycle();
     }
 
     private void startLyricForSong(KaraokeSong song) {
@@ -2248,6 +2340,16 @@ public class KaraokeActivity extends BaseActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (currentMode == Mode.PLAY) {
+            // 任一 DPAD 键 (LEFT/RIGHT/UP/DOWN/CENTER) ACTION_DOWN 重置 marquee/QR 周期
+            // —— 从 8s 显开始。必须在 mController.handleKeyEvent 之前,保证 DPAD 键(含被
+            // controller 消费和未消费的)都触发 reset。BACK/MENU/SEARCH/字母数字键不重置。
+            // 暂停态 (pausedForcesShow) 不重置,强显优先。
+            if (event.getAction() == KeyEvent.ACTION_DOWN
+                    && isDpadKey(event.getKeyCode())
+                    && !pausedForcesShow
+                    && marqueeCycleActive) {
+                resetMarqueeCycle();
+            }
             if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_DOWN) {
                 enterSelectMode();
                 return true;
@@ -2296,6 +2398,20 @@ public class KaraokeActivity extends BaseActivity {
             case KeyEvent.KEYCODE_DPAD_UP: return View.FOCUS_UP;
             case KeyEvent.KEYCODE_DPAD_DOWN: return View.FOCUS_DOWN;
             default: return 0;
+        }
+    }
+
+    /** TV 遥控器 D-pad 键集合 —— LEFT/RIGHT/UP/DOWN/CENTER。用于 marquee 周期 reset 过滤。 */
+    private static boolean isDpadKey(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return true;
+            default:
+                return false;
         }
     }
 
