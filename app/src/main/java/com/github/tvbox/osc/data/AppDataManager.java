@@ -24,6 +24,13 @@ import java.io.IOException;
 public class AppDataManager {
     private static final int DB_FILE_VERSION = 5;
     private static final String DB_NAME = "tvbox";
+
+    /**
+     * Must match the Room identity hash generated from {@link AppDataBase} at compile time.
+     * If the on-disk DB stores a different hash, it is from an older incompatible build and
+     * gets discarded by {@link #dropStaleSchemaFile()}.
+     */
+    private static final String EXPECTED_DB_IDENTITY_HASH = "c0cfc4e577af25a1fda401263924b8fa";
     private static volatile AppDataManager manager;
     private static AppDataBase dbInstance;
 
@@ -147,12 +154,63 @@ public class AppDataManager {
         }
     }
 
+    /**
+     * Room stores an identity hash in sqlite_master that reflects the entity schema compiled
+     * into the app. If a previous build's DB file is still on disk (e.g. a v5 file written by
+     * an earlier release whose entities differed from the current v5), Room refuses to open it
+     * with "Room cannot verify the data integrity", which breaks every DAO call. Detect that
+     * case by probing the stored hash and delete the stale file so Room can recreate it.
+     */
+    private static void dropStaleSchemaFile() {
+        try {
+            File dbDir = App.getInstance().getDatabasePath(dbPath()).getParentFile();
+            if (dbDir == null) return;
+            File target = new File(dbDir, dbPath());
+            if (!target.exists()) return;
+
+            android.database.sqlite.SQLiteDatabase db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                    target.getAbsolutePath(), null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
+            String hash = null;
+            try {
+                android.database.Cursor c = db.rawQuery(
+                        "SELECT identity_hash FROM room_master_table WHERE id = 0", null);
+                if (c != null) {
+                    try {
+                        if (c.moveToFirst()) {
+                            hash = c.getString(0);
+                        }
+                    } finally {
+                        c.close();
+                    }
+                }
+            } finally {
+                db.close();
+            }
+
+            // Hash written by the current build (see AppDataBase). If the on-disk hash differs,
+            // the file is from an incompatible older build and must be discarded.
+            String expected = EXPECTED_DB_IDENTITY_HASH;
+            if (!expected.equals(hash)) {
+                android.util.Log.w("AppDataManager", "Discarding stale DB file: stored hash=" + hash + " expected=" + expected);
+                //noinspection ResultOfMethodCallIgnored
+                target.delete();
+                File journal = new File(dbDir, dbPath() + "-journal");
+                if (journal.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    journal.delete();
+                }
+            }
+        } catch (Throwable ignore) {
+        }
+    }
+
     public static AppDataBase get() {
         if (manager == null) {
             throw new RuntimeException("AppDataManager is no init");
         }
         if (dbInstance == null) {
             migrateDbFileAcrossVersions();
+            dropStaleSchemaFile();
             dbInstance = Room.databaseBuilder(App.getInstance(), AppDataBase.class, dbPath())
                     .setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
                     .addMigrations(MIGRATION_1_2)

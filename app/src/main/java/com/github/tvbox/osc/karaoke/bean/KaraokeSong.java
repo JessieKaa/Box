@@ -23,7 +23,9 @@ public class KaraokeSong implements Serializable {
     public String trackId;                // API track_id (remote only)
     public String streamUrl;              // Remote stream URL (mutable, not identity)
     public String artworkUrl;             // Remote cover art URL
+    public String lyricsUrl;              // Remote LRC URL
     public String identityKey;            // stable key used for equals/hashCode/Room unique index
+    public String mediaType;              // remote API media_type ("mv"/"video" = video, else audio)
 
     public String identityKey() {
         if (identityKey != null && !identityKey.isEmpty()) return identityKey;

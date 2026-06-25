@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -80,6 +81,7 @@ import xyz.doikki.videoplayer.render.TextureRenderViewFactory;
 
 public class KaraokeActivity extends BaseActivity {
 
+    private static final String TAG = "KaraokeActivity";
     enum Mode { SELECT, PLAY }
     enum Tab { ALL, QUEUE, FAVORITES }
     enum LibraryMode { LOCAL, REMOTE }
@@ -128,6 +130,18 @@ public class KaraokeActivity extends BaseActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingErrorPlay = null;
     private Runnable pendingAudioSwitch = null;
+    private final Handler lyricPollHandler = new Handler(Looper.getMainLooper());
+    private static final long LYRIC_POLL_INTERVAL_MS = 200L;
+    private final Runnable lyricPollRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (fullLyricView != null && mVideoView != null
+                    && fullLyricView.getMode() == KaraokeFullLyricView.MODE_SCROLL) {
+                fullLyricView.setCurrentPositionMs(mVideoView.getCurrentPosition());
+            }
+            lyricPollHandler.postDelayed(this, LYRIC_POLL_INTERVAL_MS);
+        }
+    };
     private KaraokeFileScannerImpl scanCancelSignal = null;
     private KaraokeLyricLoader lyricLoader;
 
@@ -181,8 +195,8 @@ public class KaraokeActivity extends BaseActivity {
         // Video player setup
         mVideoView = findViewById(R.id.mVideoView);
         bgCarouselView = findViewById(R.id.bgCarouselView);
+        fullLyricView = findViewById(R.id.karaokeFullLyricView);
         mController = new KaraokeController(this);
-        fullLyricView = mController.getFullLyricView();
         mController.setCallback(new KaraokeController.KaraokeControllerCallback() {
             @Override
             public void onPrevious() {
@@ -254,6 +268,10 @@ public class KaraokeActivity extends BaseActivity {
                         }
                     }
                     scheduleAudioOnlyConservativeCheck();
+                    if (currentIsAudioOnly) startLyricPoll();
+                } else if (playState == VideoView.STATE_PAUSED
+                        || playState == VideoView.STATE_IDLE) {
+                    stopLyricPoll();
                 }
             }
         });
@@ -653,7 +671,7 @@ public class KaraokeActivity extends BaseActivity {
         }
         if (bgResolver != null) bgResolver.cancelAll();
         bgGeneration++;
-        if (mController != null) mController.stopLyricPoll();
+        stopLyricPoll();
         if (pendingAudioOnlyCheck != null) {
             mainHandler.removeCallbacks(pendingAudioOnlyCheck);
             pendingAudioOnlyCheck = null;
@@ -729,6 +747,12 @@ public class KaraokeActivity extends BaseActivity {
 
     private void startLyricForSong(KaraokeSong song) {
         currentSongForLyric = song;
+        Log.i(TAG, "startLyricForSong: title=" + (song != null ? song.displayName : null)
+                + ", sourceType=" + (song != null ? song.sourceType : null)
+                + ", filePath=" + (song != null ? song.filePath : null)
+                + ", streamUrl=" + (song != null ? song.streamUrl : null)
+                + ", lyricsUrl=" + (song != null ? song.lyricsUrl : null)
+                + ", audioOnly=" + currentIsAudioOnly);
         // Always start clean: cancel any prior IJK timed-text listener so stale callbacks
         // don't fire into a half-torn-down view.
         detachEmbeddedLyricListener();
@@ -740,6 +764,7 @@ public class KaraokeActivity extends BaseActivity {
         if (currentIsAudioOnly) {
             if (karaokeSubtitleView != null) karaokeSubtitleView.setVisibility(View.GONE);
             if (!lyricEnabled || !fullLyricOn) {
+                Log.i(TAG, "startLyricForSong skip: lyricEnabled=" + lyricEnabled + ", fullLyricOn=" + fullLyricOn);
                 if (fullLyricView != null) {
                     fullLyricView.reset();
                     fullLyricView.setVisibility(View.GONE);
@@ -753,21 +778,36 @@ public class KaraokeActivity extends BaseActivity {
                 fullLyricView.setVisibility(View.GONE);
             }
             if (!lyricEnabled || lyricLoader == null || karaokeSubtitleView == null) {
+                Log.i(TAG, "startLyricForSong video skip: lyricEnabled=" + lyricEnabled + ", lyricLoader=" + (lyricLoader != null) + ", subtitleView=" + (karaokeSubtitleView != null));
                 if (karaokeSubtitleView != null) karaokeSubtitleView.setVisibility(View.GONE);
                 return;
             }
         }
 
-        if (lyricLoader == null) return;
+        if (lyricLoader == null) {
+            Log.w(TAG, "startLyricForSong abort: lyricLoader null");
+            return;
+        }
         lyricLoader.loadFor(song, new KaraokeLyricLoader.Callback() {
             @Override
             public void onLyricReady(KaraokeSong requested, com.github.tvbox.osc.subtitle.model.TimedTextObject tto) {
+                Log.i(TAG, "onLyricReady: title=" + (requested != null ? requested.displayName : null)
+                        + ", captions=" + (tto != null && tto.captions != null ? tto.captions.size() : -1)
+                        + ", audioOnly=" + currentIsAudioOnly);
                 if (currentSongForLyric == null || !currentSongForLyric.equals(requested)) return;
                 if (currentIsAudioOnly) {
+                    // External LRC loaded — short-circuit the embedded-track fallback so
+                    // the audio-only poller's maybeSelectEmbeddedTrack() calls don't spin
+                    // through retries and surface the "no embedded lyric" toast.
+                    embeddedTrackSelectDone = true;
+                    if (pendingEmbeddedTrackRetry != null) {
+                        mainHandler.removeCallbacks(pendingEmbeddedTrackRetry);
+                        pendingEmbeddedTrackRetry = null;
+                    }
                     if (fullLyricView == null) return;
                     fullLyricView.setTimedTextObject(tto);
                     fullLyricView.setVisibility(View.VISIBLE);
-                    mController.startLyricPoll();
+                    startLyricPoll();
                 } else {
                     karaokeSubtitleView.bindToMediaPlayer(mVideoView.getMediaPlayer());
                     // FormatLRC.toFile() emits real `[mm:ss.xx]lyric` lines so SubtitleLoader's
@@ -776,6 +816,7 @@ public class KaraokeActivity extends BaseActivity {
                         File tmp = new File(getCacheDir(), "karaoke_lyric_" + requested.filePath.hashCode() + ".lrc");
                         String[] lines = tto != null ? new com.github.tvbox.osc.subtitle.format.FormatLRC().toFile(tto) : null;
                         if (lines == null || lines.length == 0) {
+                            Log.w(TAG, "onLyricReady but no renderable lines: title=" + (requested != null ? requested.displayName : null));
                             karaokeSubtitleView.setVisibility(View.GONE);
                             return;
                         }
@@ -788,6 +829,7 @@ public class KaraokeActivity extends BaseActivity {
                         karaokeSubtitleView.setSubtitlePath(tmp.getAbsolutePath());
                         karaokeSubtitleView.setVisibility(View.VISIBLE);
                     } catch (Throwable t) {
+                        Log.w(TAG, "video lyric render failed", t);
                         karaokeSubtitleView.setVisibility(View.GONE);
                     }
                 }
@@ -795,6 +837,9 @@ public class KaraokeActivity extends BaseActivity {
 
             @Override
             public void onNoLyric(KaraokeSong requested) {
+                Log.w(TAG, "onNoLyric: title=" + (requested != null ? requested.displayName : null)
+                        + ", lyricsUrl=" + (requested != null ? requested.lyricsUrl : null)
+                        + ", audioOnly=" + currentIsAudioOnly);
                 if (currentSongForLyric == null || !currentSongForLyric.equals(requested)) return;
                 if (karaokeSubtitleView != null) {
                     karaokeSubtitleView.setVisibility(View.GONE);
@@ -808,6 +853,7 @@ public class KaraokeActivity extends BaseActivity {
                         fullLyricView.setMode(KaraokeFullLyricView.MODE_LIVE);
                         fullLyricView.setVisibility(View.VISIBLE);
                     }
+                    Log.i(TAG, "onNoLyric fallback to embedded timed text");
                     // If the player is already STATE_PLAYING, select the track now;
                     // otherwise the STATE_PLAYING conservative-check hook will trigger it.
                     maybeSelectEmbeddedTrack();
@@ -1008,6 +1054,12 @@ public class KaraokeActivity extends BaseActivity {
         return StorageDriveType.isKaraokeAudioType(path.substring(dot + 1));
     }
 
+    private static boolean isVideoMediaType(String mediaType) {
+        if (mediaType == null || mediaType.isEmpty()) return false;
+        String mt = mediaType.trim().toLowerCase();
+        return "mv".equals(mt) || "video".equals(mt) || "music_video".equals(mt);
+    }
+
     /**
      * Toggle all UI surfaces that depend on audio-only mode: player surface visibility,
      * controller mode flag, and background carousel. The carousel runs an async image
@@ -1020,6 +1072,11 @@ public class KaraokeActivity extends BaseActivity {
         currentIsAudioOnly = audioOnly;
         if (mController != null) mController.setAudioOnlyMode(audioOnly);
         if (mVideoView != null) mVideoView.setVisibility(audioOnly ? View.GONE : View.VISIBLE);
+        if (fullLyricView != null && !audioOnly) {
+            fullLyricView.reset();
+            fullLyricView.setVisibility(View.GONE);
+            stopLyricPoll();
+        }
         if (bgCarouselView == null) return;
         boolean bgOn = Hawk.get(HawkConfig.KARAOKE_BG_CAROUSEL, true);
         if (audioOnly && bgOn) {
@@ -1053,6 +1110,17 @@ public class KaraokeActivity extends BaseActivity {
             if (bgResolver != null) bgResolver.cancelAll();
             bgGeneration++; // local mirror keeps UI-thread check consistent
         }
+    }
+
+    /** Begin periodic position → lyric-row updates. Only forwards in SCROLL mode. */
+    private void startLyricPoll() {
+        lyricPollHandler.removeCallbacks(lyricPollRunnable);
+        lyricPollHandler.postDelayed(lyricPollRunnable, LYRIC_POLL_INTERVAL_MS);
+    }
+
+    /** Stop the position poller. Safe to call when not running. */
+    private void stopLyricPoll() {
+        lyricPollHandler.removeCallbacks(lyricPollRunnable);
     }
 
     private void recordKaraokeHistory(final KaraokeSong song, final long playbackPosition) {
@@ -1115,8 +1183,8 @@ public class KaraokeActivity extends BaseActivity {
             return;
         }
 
-        currentIsAudioOnly = false;
-        applyAudioOnlyUi(false);
+        currentIsAudioOnly = !isVideoMediaType(song.mediaType);
+        applyAudioOnlyUi(currentIsAudioOnly);
 
         apiService.getTrackDetail(song.trackId, new KaraokeApiService.DetailCallback() {
             @Override
@@ -1127,6 +1195,12 @@ public class KaraokeActivity extends BaseActivity {
                         if (myToken != pendingPlayRequestToken) return;
                         song.streamUrl = fresh.streamUrl;
                         song.artworkUrl = fresh.artworkUrl;
+                        song.lyricsUrl = fresh.lyricsUrl;
+                        if (fresh.mediaType != null && !fresh.mediaType.isEmpty()) {
+                            song.mediaType = fresh.mediaType;
+                            currentIsAudioOnly = !isVideoMediaType(song.mediaType);
+                            applyAudioOnlyUi(currentIsAudioOnly);
+                        }
                         launchPlayback(song, myToken);
                         recordKaraokeHistory(song, lastPlaybackPosition);
                     }
@@ -1430,7 +1504,7 @@ public class KaraokeActivity extends BaseActivity {
                         }
                         detachEmbeddedLyricListener();
                         if (lyricLoader != null) lyricLoader.cancelAll();
-                        if (mController != null) mController.stopLyricPoll();
+                        stopLyricPoll();
                     } else if (newVal && currentMode == Mode.PLAY && currentPlayingSong != null) {
                         startLyricForSong(currentPlayingSong);
                     }
@@ -1446,7 +1520,7 @@ public class KaraokeActivity extends BaseActivity {
                         }
                         detachEmbeddedLyricListener();
                         embeddedTrackSelectDone = true;
-                        if (mController != null) mController.stopLyricPoll();
+                        stopLyricPoll();
                     } else {
                         embeddedTrackSelectDone = false;
                         if (currentMode == Mode.PLAY && currentIsAudioOnly && currentPlayingSong != null) {
@@ -1707,7 +1781,7 @@ public class KaraokeActivity extends BaseActivity {
                 fullLyricView.reset();
                 fullLyricView.setVisibility(View.GONE);
             }
-            if (mController != null) mController.stopLyricPoll();
+            stopLyricPoll();
             if (pendingAudioOnlyCheck != null) {
                 mainHandler.removeCallbacks(pendingAudioOnlyCheck);
                 pendingAudioOnlyCheck = null;
@@ -1920,7 +1994,8 @@ public class KaraokeActivity extends BaseActivity {
             }
 
             @Override
-            public void onFailure(String msg) {
+            public void onFailure(final String msg) {
+                Log.w(TAG, "remote list failed: " + msg);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
@@ -1935,6 +2010,7 @@ public class KaraokeActivity extends BaseActivity {
 
                             @Override
                             public void onFailure(String msg) {
+                                Log.w(TAG, "remote health failed after list failure: " + msg);
                                 startDiscovery(true, true);
                             }
                         });
@@ -2209,7 +2285,7 @@ public class KaraokeActivity extends BaseActivity {
         apiService.cancelDetail();
         if (discoveryManager != null) discoveryManager.stopScan();
         if (bgCarouselView != null) bgCarouselView.stop();
-        if (mController != null) mController.stopLyricPoll();
+        stopLyricPoll();
         if (pendingAudioOnlyCheck != null) {
             mainHandler.removeCallbacks(pendingAudioOnlyCheck);
             pendingAudioOnlyCheck = null;
@@ -2254,6 +2330,7 @@ public class KaraokeActivity extends BaseActivity {
         if (pendingErrorPlay != null) mainHandler.removeCallbacks(pendingErrorPlay);
         if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
         mainHandler.removeCallbacksAndMessages(null);
+        lyricPollHandler.removeCallbacksAndMessages(null);
         if (mController != null) mController.release();
         KaraokeRemoteManager.get().detach();
         if (mVideoView != null) mVideoView.release();

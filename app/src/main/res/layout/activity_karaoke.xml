@@ -19,6 +19,18 @@
         android:layout_height="match_parent"
         android:visibility="gone" />
 
+    <!-- Full-screen scrolling lyric for audio-only playback. Sits above mVideoView so it
+         shows through when the player surface is GONE, but below llSelectLayer so the
+         song browser stays interactive. Driven by KaraokeActivity (visibility + position
+         polling). The controller no longer owns this view — its old home inside the
+         controller went 0x0 when mVideoView was set to GONE. -->
+    <com.github.tvbox.osc.karaoke.lyric.KaraokeFullLyricView
+        android:id="@+id/karaokeFullLyricView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/llSelectLayer"
         android:layout_width="match_parent"

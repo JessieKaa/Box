@@ -154,16 +154,6 @@
 
     </LinearLayout>
 
-    <!-- Full-screen scrolling lyric for audio-only playback. Lives above the player
-         surface but below the bottom/top bars (drawn before llBottomBar so it doesn't
-         cover the controls). Hidden by default; controller toggles it via setAudioOnlyMode. -->
-    <com.github.tvbox.osc.karaoke.lyric.KaraokeFullLyricView
-        android:id="@+id/karaokeFullLyricView"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_gravity="center"
-        android:visibility="gone" />
-
     <LinearLayout
         android:id="@+id/llBottomBar"
         android:layout_width="match_parent"

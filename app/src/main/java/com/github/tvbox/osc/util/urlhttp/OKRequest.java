@@ -21,7 +21,6 @@ class OKRequest {
     private final String mJsonStr;
     private final Map<String, String> mHeaderMap;
     private final OKCallBack mCallBack;
-    private okhttp3.Request mOkHttpRequest;
     private okhttp3.Request.Builder mRequestBuilder;
 
 
@@ -47,6 +46,13 @@ class OKRequest {
         mTag = tag;
     }
 
+    private okhttp3.Request buildRequest() {
+        if (mTag != null) {
+            mRequestBuilder.tag(mTag);
+        }
+        return mRequestBuilder.build();
+    }
+
     private void getInstance() {
         mRequestBuilder = new okhttp3.Request.Builder();
         switch (mMethodType) {
@@ -58,12 +64,9 @@ class OKRequest {
                 break;
         }
         mRequestBuilder.url(mUrl);
-        if (mTag != null)
-            mRequestBuilder.tag(mTag);
         if (mHeaderMap != null) {
             setHeader();
         }
-        mOkHttpRequest = mRequestBuilder.build();
     }
 
     private RequestBody getRequestBody() {
@@ -99,7 +102,7 @@ class OKRequest {
     }
 
     void execute(OkHttpClient client) {
-        Call call = client.newCall(mOkHttpRequest);
+        Call call = client.newCall(buildRequest());
         try {
             Response response = call.execute();
             if (mCallBack != null) {
@@ -113,7 +116,7 @@ class OKRequest {
     }
 
     void call(OkHttpClient client) {
-        client.newCall(mOkHttpRequest).enqueue(new Callback() {
+        client.newCall(buildRequest()).enqueue(new Callback() {
             @Override
             public void onFailure(final Call call, final IOException e) {
                 if (mCallBack != null) {

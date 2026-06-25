@@ -20,6 +20,9 @@ public class KaraokeTrack {
     public String stream_url_absolute;
     public String artwork_url;
     public String artwork_url_absolute;
+    public String lyrics_url;
+    public String lyrics_url_absolute;
+    public String lyrics_source;
 
     public KaraokeSong toKaraokeSong(String baseUrl) {
         if (id == null || id <= 0) return null;
@@ -39,6 +42,8 @@ public class KaraokeTrack {
         song.filePath = resolvedStream;
         song.streamUrl = resolvedStream;
         song.artworkUrl = resolveUrl(firstNonEmpty(artwork_url_absolute, artwork_url), baseUrl);
+        song.lyricsUrl = resolveUrl(firstNonEmpty(lyrics_url_absolute, lyrics_url), baseUrl);
+        song.mediaType = media_type;
         return song;
     }
 

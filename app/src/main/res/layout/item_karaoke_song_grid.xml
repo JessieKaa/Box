@@ -10,7 +10,8 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:gravity="center_vertical"
-        android:orientation="vertical">
+        android:orientation="vertical"
+        android:paddingRight="@dimen/vs_35">
 
         <TextView
             android:id="@+id/tvTitle"
@@ -53,7 +54,7 @@
         android:id="@+id/ivFavorite"
         android:layout_width="@dimen/vs_30"
         android:layout_height="@dimen/vs_30"
-        android:layout_gravity="start|bottom"
+        android:layout_gravity="end|bottom"
         android:src="@drawable/icon_no_collect"
         android:background="@drawable/button_dialog_vod"
         android:focusable="false"
