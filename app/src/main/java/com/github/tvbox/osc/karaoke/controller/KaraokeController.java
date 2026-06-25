@@ -78,6 +78,69 @@ public class KaraokeController extends BaseVideoController {
     private long lastSlideTime = 0;
     private boolean wasPlayingBeforeSeek = false;
 
+    // D-pad LEFT/RIGHT gesture state machine.
+    //
+    // Three modes per side, driven by ACTION_DOWN/ACTION_UP + a couple of timers:
+    //   - IDLE (lastXxxTapMs == 0 && !xxxSeekHolding && !xxxDoubleTapFired)
+    //   - PENDING_LONG_PRESS: 250ms timer armed; if UP arrives first → single tap,
+    //     if timer fires first → SEEK_HOLDING.
+    //   - SEEK_HOLDING: long-press confirmed; 100ms pulse keeps calling tvSlideStart(dir)
+    //     until UP commits with tvSlideStop().
+    //
+    // Double-tap detection: ACTION_DOWN within DOUBLE_TAP_WINDOW_MS of the previous
+    // single-tap UP → fire onPrevious/onNext and set xxxDoubleTapFired so the matching
+    // UP doesn't re-stamp lastXxxTapMs (otherwise a 3rd press would loop into a 2nd
+    // double-tap, contrary to PLAN's "triple = double + new single tap").
+    //
+    // System key repeat: while SEEK_HOLDING, Android may keep sending repeated
+    // ACTION_DOWN events with getRepeatCount() > 0; we must swallow those — otherwise
+    // handleDpadHorizontal would be re-entered, the seek pulse state would be reset,
+    // and the final UP could be misrouted to the single-tap branch, dropping the
+    // tvSlideStop() commit.
+    private static final long LONG_PRESS_THRESHOLD_MS = 250;
+    private static final long DOUBLE_TAP_WINDOW_MS = 300;
+    private static final long SEEK_PULSE_INTERVAL_MS = 100;
+    private final Handler dpadGestureHandler = new Handler(Looper.getMainLooper());
+    private long lastLeftTapMs = 0;
+    private long lastRightTapMs = 0;
+    private boolean leftDoubleTapFired = false;
+    private boolean rightDoubleTapFired = false;
+    private boolean leftSeekHolding = false;
+    private boolean rightSeekHolding = false;
+    private final Runnable leftLongArmRunnable = new Runnable() {
+        @Override
+        public void run() {
+            // Long-press confirmed: kick off continuous seek until ACTION_UP.
+            leftSeekHolding = true;
+            tvSlideStart(-1);
+            dpadGestureHandler.postDelayed(leftSeekPulseRunnable, SEEK_PULSE_INTERVAL_MS);
+        }
+    };
+    private final Runnable rightLongArmRunnable = new Runnable() {
+        @Override
+        public void run() {
+            rightSeekHolding = true;
+            tvSlideStart(1);
+            dpadGestureHandler.postDelayed(rightSeekPulseRunnable, SEEK_PULSE_INTERVAL_MS);
+        }
+    };
+    private final Runnable leftSeekPulseRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!leftSeekHolding) return;
+            tvSlideStart(-1);
+            dpadGestureHandler.postDelayed(this, SEEK_PULSE_INTERVAL_MS);
+        }
+    };
+    private final Runnable rightSeekPulseRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!rightSeekHolding) return;
+            tvSlideStart(1);
+            dpadGestureHandler.postDelayed(this, SEEK_PULSE_INTERVAL_MS);
+        }
+    };
+
     private KaraokeControllerCallback callback;
     private final Handler hideHandler = new Handler(Looper.getMainLooper());
     private final Handler seekOverlayHandler = new Handler(Looper.getMainLooper());
@@ -85,10 +148,34 @@ public class KaraokeController extends BaseVideoController {
     private boolean isPlaying = false;
     private boolean audioOnlyMode = false;
 
-    /** Cancel any pending hide/overlay callbacks. Call from Activity.onDestroy to prevent leaks. */
+    /** Cancel any pending hide/overlay/gesture callbacks. Call from Activity.onDestroy to prevent leaks. */
     public void release() {
+        cancelDpadGesture();
         hideHandler.removeCallbacksAndMessages(null);
         seekOverlayHandler.removeCallbacksAndMessages(null);
+        dpadGestureHandler.removeCallbacksAndMessages(null);
+    }
+
+    /**
+     * Tear down any in-progress LEFT/RIGHT gesture: cancel pending long-press arming,
+     * stop the seek pulse, clear double-tap markers and tap timestamps. Call from
+     * any path that leaves the gesture surface (hide/cancelSeekState/release, or
+     * when the activity switches out of PLAY mode without delivering the matching UP).
+     * Does NOT touch {@code simSlideStart} — callers that need to commit or discard
+     * the underlying seek are expected to invoke {@link #tvSlideStop()} (commit) or
+     * clear {@code simSlideStart} themselves (discard), as appropriate for that path.
+     */
+    private void cancelDpadGesture() {
+        dpadGestureHandler.removeCallbacks(leftLongArmRunnable);
+        dpadGestureHandler.removeCallbacks(rightLongArmRunnable);
+        dpadGestureHandler.removeCallbacks(leftSeekPulseRunnable);
+        dpadGestureHandler.removeCallbacks(rightSeekPulseRunnable);
+        leftSeekHolding = false;
+        rightSeekHolding = false;
+        leftDoubleTapFired = false;
+        rightDoubleTapFired = false;
+        lastLeftTapMs = 0;
+        lastRightTapMs = 0;
     }
 
     private final Runnable autoHideRunnable = new Runnable() {
@@ -375,6 +462,12 @@ public class KaraokeController extends BaseVideoController {
 
     @Override
     public void hide() {
+        // Stop the dpad seek pulse BEFORE the seek-commit block below: the pulse
+        // keeps calling tvSlideStart(dir) which mutates simSeekPosition, racing the
+        // commit. Cancelling first guarantees a stable position to land on. This also
+        // covers the case where the user leaves PLAY mode (e.g. via BACK) without a
+        // matching LEFT/RIGHT UP ever reaching handleKeyEvent.
+        cancelDpadGesture();
         if (mShowing) {
             llTopBar.setVisibility(GONE);
             llBottomBar.setVisibility(GONE);
@@ -403,6 +496,9 @@ public class KaraokeController extends BaseVideoController {
     }
 
     private void cancelSeekState() {
+        // Mirror hide()'s gesture teardown — on STATE_ERROR / STATE_PREPARING / etc the
+        // controller is being reset while a long-press pulse may still be running.
+        cancelDpadGesture();
         if (simSlideStart) {
             simSlideStart = false;
             simSeekPosition = 0;
@@ -478,26 +574,51 @@ public class KaraokeController extends BaseVideoController {
 
     public boolean handleKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
+        int action = event.getAction();
 
-        if (event.getAction() == KeyEvent.ACTION_UP) {
-            if ((keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) && simSlideStart) {
-                tvSlideStop();
+        if (action == KeyEvent.ACTION_UP) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                finishDpadHorizontal(-1);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                finishDpadHorizontal(1);
                 return true;
             }
             return false;
         }
 
-        // ACTION_DOWN
+        if (action != KeyEvent.ACTION_DOWN) {
+            return false;
+        }
+
+        // System key-repeat: while holding LEFT/RIGHT the platform keeps sending
+        // additional ACTION_DOWN events with getRepeatCount() > 0. Once we've armed
+        // the long-press pulse these are noise — swallow them so the state machine
+        // stays in SEEK_HOLDING until ACTION_UP. For other keys, also collapse
+        // autorepeat (we don't act on repeats anywhere).
+        if (event.getRepeatCount() > 0) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                    || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                    || keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                    || keyCode == KeyEvent.KEYCODE_SPACE
+                    || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                return true;
+            }
+        }
+
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_SPACE:
                 if (callback != null) callback.onTogglePlayPause();
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
-                if (callback != null) callback.onPrevious();
+                if (callback != null) callback.onSwitchAudioTrack();
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                if (callback != null) callback.onNext();
+                // Swallow by default. Old behaviour fired onNext, which collides with
+                // "double-tap RIGHT = next song" and would skip songs on stray presses.
+                // A-key still triggers audio track switching; MENU/INFO still exits.
                 return true;
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_INFO:
@@ -507,12 +628,98 @@ public class KaraokeController extends BaseVideoController {
                 if (callback != null) callback.onSwitchAudioTrack();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                tvSlideStart(-1);
+                startDpadHorizontal(-1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                tvSlideStart(1);
+                startDpadHorizontal(1);
                 return true;
         }
         return false;
+    }
+
+    /**
+     * ACTION_DOWN handler for LEFT/RIGHT. Resolves to one of:
+     * <ul>
+     *   <li>Double-tap: previous same-direction single-tap UP was within
+     *       {@link #DOUBLE_TAP_WINDOW_MS} → fire {@code onPrevious/onNext} and mark
+     *       {@code xxxDoubleTapFired} so the matching UP doesn't re-stamp.</li>
+     *   <li>Pending long-press: arm a {@link #LONG_PRESS_THRESHOLD_MS} timer. If UP
+     *       arrives first → single tap (timestamp recorded for next double-tap window).
+     *       If the timer fires first → enters SEEK_HOLDING via {@code xxxLongArmRunnable}.</li>
+     * </ul>
+     */
+    private void startDpadHorizontal(int dir) {
+        long now = System.currentTimeMillis();
+        if (dir < 0) {
+            if (lastLeftTapMs != 0 && (now - lastLeftTapMs) <= DOUBLE_TAP_WINDOW_MS) {
+                dpadGestureHandler.removeCallbacks(leftLongArmRunnable);
+                leftSeekHolding = false;
+                dpadGestureHandler.removeCallbacks(leftSeekPulseRunnable);
+                lastLeftTapMs = 0;
+                leftDoubleTapFired = true;
+                if (callback != null) callback.onPrevious();
+            } else {
+                lastLeftTapMs = 0;
+                dpadGestureHandler.removeCallbacks(leftLongArmRunnable);
+                leftSeekHolding = false;
+                dpadGestureHandler.removeCallbacks(leftSeekPulseRunnable);
+                dpadGestureHandler.postDelayed(leftLongArmRunnable, LONG_PRESS_THRESHOLD_MS);
+            }
+        } else {
+            if (lastRightTapMs != 0 && (now - lastRightTapMs) <= DOUBLE_TAP_WINDOW_MS) {
+                dpadGestureHandler.removeCallbacks(rightLongArmRunnable);
+                rightSeekHolding = false;
+                dpadGestureHandler.removeCallbacks(rightSeekPulseRunnable);
+                lastRightTapMs = 0;
+                rightDoubleTapFired = true;
+                if (callback != null) callback.onNext();
+            } else {
+                lastRightTapMs = 0;
+                dpadGestureHandler.removeCallbacks(rightLongArmRunnable);
+                rightSeekHolding = false;
+                dpadGestureHandler.removeCallbacks(rightSeekPulseRunnable);
+                dpadGestureHandler.postDelayed(rightLongArmRunnable, LONG_PRESS_THRESHOLD_MS);
+            }
+        }
+    }
+
+    /**
+     * ACTION_UP handler for LEFT/RIGHT. Branches on current gesture state:
+     * <ul>
+     *   <li>SEEK_HOLDING: stop the pulse and {@link #tvSlideStop()} to commit the seek.</li>
+     *   <li>Double-tap marker: consume, reset timestamp to 0 (third press must start a
+     *       fresh single-tap window).</li>
+     *   <li>Pending long-press: cancel the timer and record the single-tap timestamp
+     *       so the next DOWN within the double-tap window fires song switch.</li>
+     * </ul>
+     */
+    private void finishDpadHorizontal(int dir) {
+        if (dir < 0) {
+            if (leftSeekHolding) {
+                dpadGestureHandler.removeCallbacks(leftSeekPulseRunnable);
+                tvSlideStop();
+                leftSeekHolding = false;
+                lastLeftTapMs = 0;
+            } else if (leftDoubleTapFired) {
+                leftDoubleTapFired = false;
+                lastLeftTapMs = 0;
+            } else {
+                dpadGestureHandler.removeCallbacks(leftLongArmRunnable);
+                lastLeftTapMs = System.currentTimeMillis();
+            }
+        } else {
+            if (rightSeekHolding) {
+                dpadGestureHandler.removeCallbacks(rightSeekPulseRunnable);
+                tvSlideStop();
+                rightSeekHolding = false;
+                lastRightTapMs = 0;
+            } else if (rightDoubleTapFired) {
+                rightDoubleTapFired = false;
+                lastRightTapMs = 0;
+            } else {
+                dpadGestureHandler.removeCallbacks(rightLongArmRunnable);
+                lastRightTapMs = System.currentTimeMillis();
+            }
+        }
     }
 }

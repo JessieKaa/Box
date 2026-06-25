@@ -77,6 +77,13 @@
     <string name="karaoke_error_disk_full">空间不足，无法上传</string>
     <string name="karaoke_upload_progress">正在上传… %d%%</string>
     <string name="karaoke_upload_done">上传完成</string>
+    <string name="karaoke_toast_playing">播放中</string>
+    <string name="karaoke_toast_paused">已暂停</string>
+    <string name="karaoke_toast_track_switched">已切换至：%1$s</string>
+    <string name="karaoke_toast_no_multi_track">当前歌曲无多音轨</string>
+    <string name="karaoke_toast_prev_song">上一曲：%1$s</string>
+    <string name="karaoke_toast_next_song">下一曲：%1$s</string>
+    <string name="karaoke_toast_no_more_songs">已到最后一首</string>
     <string name="hm_style_line">单行显示</string>
     <string name="hm_style_grid">多行显示</string>
     <string name="hm_hist_del">已删除当前记录</string>

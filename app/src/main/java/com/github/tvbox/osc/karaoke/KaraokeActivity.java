@@ -1264,11 +1264,16 @@ public class KaraokeActivity extends BaseActivity {
     private void playNext() {
         KaraokeSong next = session.playNext();
         if (next != null) {
+            Toast.makeText(mContext,
+                    String.format(getString(R.string.karaoke_toast_next_song),
+                            next.displayName != null ? next.displayName : next.title),
+                    Toast.LENGTH_SHORT).show();
             playSong(next);
         } else {
             // Queue finished
             currentPlayingSong = null;
             lastPlaybackPosition = 0;
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_no_more_songs), Toast.LENGTH_SHORT).show();
             enterSelectMode();
         }
     }
@@ -1276,9 +1281,13 @@ public class KaraokeActivity extends BaseActivity {
     private void playPrevious() {
         KaraokeSong prev = session.playPrevious();
         if (prev != null) {
+            Toast.makeText(mContext,
+                    String.format(getString(R.string.karaoke_toast_prev_song),
+                            prev.displayName != null ? prev.displayName : prev.title),
+                    Toast.LENGTH_SHORT).show();
             playSong(prev);
         } else {
-            Toast.makeText(mContext, getString(R.string.karaoke_no_more), Toast.LENGTH_SHORT).show();
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_no_more_songs), Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1297,9 +1306,11 @@ public class KaraokeActivity extends BaseActivity {
         if (mVideoView.isPlaying()) {
             mVideoView.pause();
             userPaused = true;
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_paused), Toast.LENGTH_SHORT).show();
         } else {
             mVideoView.resume();
             userPaused = false;
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_playing), Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -2082,67 +2093,54 @@ public class KaraokeActivity extends BaseActivity {
         final AbstractPlayer absPlayer = mediaPlayer;
         TrackInfo trackInfo = trackPlayer.getTrackInfo();
         if (trackInfo == null) {
-            Toast.makeText(mContext, getString(R.string.karaoke_no_audio_track), Toast.LENGTH_SHORT).show();
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_no_multi_track), Toast.LENGTH_SHORT).show();
             return;
         }
         final List<TrackInfoBean> audioTracks = trackInfo.getAudio();
-        if (audioTracks.isEmpty()) {
-            Toast.makeText(mContext, getString(R.string.karaoke_no_audio_track), Toast.LENGTH_SHORT).show();
+        // Single-track (or zero) songs can't be switched — surface the dedicated message
+        // instead of the legacy "no audio track info" wording so users understand the
+        // remote action was recognised but nothing to toggle.
+        if (audioTracks.size() <= 1) {
+            Toast.makeText(mContext, getString(R.string.karaoke_toast_no_multi_track), Toast.LENGTH_SHORT).show();
             return;
         }
-        int selected = 0;
+        int selectedIdx = 0;
         for (int i = 0; i < audioTracks.size(); i++) {
             if (audioTracks.get(i).selected) {
-                selected = i;
+                selectedIdx = i;
                 break;
             }
         }
-        SelectDialog<TrackInfoBean> dialog = new SelectDialog<>(this);
-        dialog.setTip(getString(R.string.karaoke_select_audio_track));
-        dialog.setAdapter(null, new SelectDialogAdapter.SelectDialogInterface<TrackInfoBean>() {
-            @Override
-            public void click(TrackInfoBean value, int pos) {
-                savedAudioTrackId = value.trackId;
-                try {
-                    for (TrackInfoBean audio : audioTracks) {
-                        audio.selected = audio.trackId == value.trackId;
-                    }
-                    absPlayer.pause();
-                    final long progress = absPlayer.getCurrentPosition();
-                    trackPlayer.setTrack(value.trackId);
-                    mController.setTrackInfo(value.name);
-                    if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
-                    pendingAudioSwitch = new Runnable() {
-                        @Override
-                        public void run() {
-                            pendingAudioSwitch = null;
-                            absPlayer.seekTo(progress);
-                            absPlayer.start();
-                        }
-                    };
-                    mainHandler.postDelayed(pendingAudioSwitch, 800);
-                    dialog.dismiss();
-                } catch (Exception e) {
-                    e.printStackTrace();
+        // Rotate to the next track, wrapping at the end. This matches the typical
+        // karaoke use-case of toggling between "original" and "accompaniment" vocals.
+        final int nextIdx = (selectedIdx + 1) % audioTracks.size();
+        final TrackInfoBean nextTrack = audioTracks.get(nextIdx);
+        try {
+            for (TrackInfoBean audio : audioTracks) {
+                audio.selected = audio.trackId == nextTrack.trackId;
+            }
+            absPlayer.pause();
+            final long progress = absPlayer.getCurrentPosition();
+            trackPlayer.setTrack(nextTrack.trackId);
+            savedAudioTrackId = nextTrack.trackId;
+            mController.setTrackInfo(nextTrack.name);
+            Toast.makeText(mContext,
+                    String.format(getString(R.string.karaoke_toast_track_switched),
+                            nextTrack.name != null ? nextTrack.name : ""),
+                    Toast.LENGTH_SHORT).show();
+            if (pendingAudioSwitch != null) mainHandler.removeCallbacks(pendingAudioSwitch);
+            pendingAudioSwitch = new Runnable() {
+                @Override
+                public void run() {
+                    pendingAudioSwitch = null;
+                    absPlayer.seekTo(progress);
+                    absPlayer.start();
                 }
-            }
-
-            @Override
-            public String getDisplay(TrackInfoBean val) {
-                return val.name;
-            }
-        }, new DiffUtil.ItemCallback<TrackInfoBean>() {
-            @Override
-            public boolean areItemsTheSame(@NonNull TrackInfoBean oldItem, @NonNull TrackInfoBean newItem) {
-                return oldItem.trackId == newItem.trackId;
-            }
-
-            @Override
-            public boolean areContentsTheSame(@NonNull TrackInfoBean oldItem, @NonNull TrackInfoBean newItem) {
-                return oldItem.trackId == newItem.trackId;
-            }
-        }, audioTracks, selected);
-        dialog.show();
+            };
+            mainHandler.postDelayed(pendingAudioSwitch, 800);
+        } catch (Exception e) {
+            Log.e(TAG, "switchAudioTrack failed", e);
+        }
     }
 
     // ======================== Key Handling ========================
