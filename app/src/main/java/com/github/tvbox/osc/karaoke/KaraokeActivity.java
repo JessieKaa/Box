@@ -151,6 +151,20 @@ public class KaraokeActivity extends BaseActivity {
     private SimpleSubtitleView karaokeSubtitleView;
     private KaraokeFullLyricView fullLyricView;
 
+    // Play-mode top bar + QR — live in activity_karaoke.xml (not the controller) so
+    // they keep screen-sized bounds when mVideoView is set to GONE in audio-only mode.
+    // The controller subtree gets cropped to 0x0 in that case, hiding anything inside.
+    private LinearLayout llTopBar;
+    private TextView tvSongTitle;
+    private TextView tvTrackInfo;
+    private LinearLayout llPlayerQR;
+    private ImageView ivPlayerQR;
+    private Bitmap playerQRBitmap;
+    private boolean playerQRVisible = false;
+    private boolean marqueeOn = false;
+    private String lastMarqueeText = null;
+    private String lastTrackInfo = null;
+
     // Select layer views
     private LinearLayout llSelectLayer;
     private EditText etSearch;
@@ -292,6 +306,13 @@ public class KaraokeActivity extends BaseActivity {
         ivNextBottom = findViewById(R.id.ivNextBottom);
         llQRCode = findViewById(R.id.llQRCode);
         ivQRCode = findViewById(R.id.ivQRCode);
+
+        // Play-mode top bar + QR bindings (lifted from controller_karaoke.xml).
+        llTopBar = findViewById(R.id.llTopBar);
+        tvSongTitle = findViewById(R.id.tvSongTitle);
+        tvTrackInfo = findViewById(R.id.tvTrackInfo);
+        llPlayerQR = findViewById(R.id.llPlayerQR);
+        ivPlayerQR = findViewById(R.id.ivPlayerQR);
 
         // Karaoke lyric view (lives inside the play-mode controller)
         karaokeSubtitleView = mController.getLyricView();
@@ -620,33 +641,105 @@ public class KaraokeActivity extends BaseActivity {
     }
 
     /**
-     * Builds the up-to-3 next-up title list from the session queue and pushes it to the controller.
-     * Also drives the top-bar marquee: "当前播放：{current}　　下一首：{next}".
+     * Builds the up-to-3 next-up title list from the session queue and drives the
+     * activity-level top-bar marquee: "当前播放：{current}　　下一首：{next}".
      */
     private void pushNextUpToController() {
         if (session == null) {
-            mController.setNextUp(Collections.emptyList());
-            mController.setMarqueeText("", "");
+            updateMarqueeUI("", null);
             return;
         }
         List<KaraokeSong> queue = session.getQueue();
         int curr = session.getCurrentQueueIndex();
-        List<String> next = new ArrayList<>();
         String nextTitle = null;
         if (queue != null && curr >= 0) {
-            for (int i = curr + 1; i < queue.size() && next.size() < 3; i++) {
+            for (int i = curr + 1; i < queue.size(); i++) {
                 KaraokeSong s = queue.get(i);
                 if (s == null) continue;
-                String dn = s.displayName != null ? s.displayName : s.title;
-                if (next.isEmpty()) nextTitle = dn;
-                next.add(dn);
+                nextTitle = s.displayName != null ? s.displayName : s.title;
+                break;
             }
         }
-        mController.setNextUp(next);
         String currentTitle = currentPlayingSong != null
                 ? (currentPlayingSong.displayName != null ? currentPlayingSong.displayName : currentPlayingSong.title)
                 : "";
-        mController.setMarqueeText(currentTitle, nextTitle);
+        updateMarqueeUI(currentTitle, nextTitle);
+    }
+
+    /**
+     * Render the top-bar marquee. Caller passes the explicit current title and next
+     * title (null/empty = end of queue). When {@code marqueeOn} is false the whole
+     * {@code llTopBar} is hidden. text is de-duplicated via {@code lastMarqueeText}
+     * so queue refreshes don't restart a long-title scroll mid-flight.
+     */
+    private void updateMarqueeUI(String currentTitle, String nextTitle) {
+        if (llTopBar == null || tvSongTitle == null) return;
+        if (!marqueeOn) {
+            llTopBar.setVisibility(View.GONE);
+            lastMarqueeText = null;
+            return;
+        }
+        String current = currentTitle == null ? "" : currentTitle;
+        String nextDisplay;
+        if (nextTitle == null || nextTitle.trim().isEmpty()) {
+            nextDisplay = getString(R.string.karaoke_no_next_song);
+        } else {
+            nextDisplay = nextTitle;
+        }
+        String text = getString(R.string.karaoke_now_playing_marquee, current, nextDisplay);
+        llTopBar.setVisibility(View.VISIBLE);
+        if (!text.equals(lastMarqueeText)) {
+            lastMarqueeText = text;
+            tvSongTitle.setText(text);
+            tvSongTitle.setSelected(false);
+            tvSongTitle.setSelected(true);
+        }
+        if (lastTrackInfo != null) {
+            tvTrackInfo.setText(lastTrackInfo);
+        }
+    }
+
+    /**
+     * Direct write of the secondary "track info" TextView (e.g. current audio-track
+     * name). Doesn't touch visibility — {@link #updateMarqueeUI} handles that.
+     */
+    private void setTrackInfo(String info) {
+        lastTrackInfo = info;
+        if (tvTrackInfo != null) tvTrackInfo.setText(info == null ? "" : info);
+    }
+
+    /**
+     * Direct write of the song-title TextView. Bypasses the marquee de-dup cache:
+     * clears {@code lastMarqueeText} so the next {@link #updateMarqueeUI} call
+     * re-applies even if the resolved text matches the previous one.
+     */
+    private void setSongTitle(String title) {
+        if (tvSongTitle != null) tvSongTitle.setText(title);
+        lastMarqueeText = null;
+    }
+
+    /**
+     * Render the play-mode QR container based on {@code playerQRVisible} and
+     * whether we have a bitmap. Bitmap is cached so re-showing after a hide
+     * doesn't require callers to re-supply it.
+     */
+    private void updatePlayerQRUI() {
+        if (llPlayerQR == null) return;
+        boolean show = playerQRVisible && playerQRBitmap != null;
+        llPlayerQR.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (show && ivPlayerQR != null) {
+            ivPlayerQR.setImageBitmap(playerQRBitmap);
+        }
+    }
+
+    private void setPlayerQR(Bitmap bitmap) {
+        playerQRBitmap = bitmap;
+        updatePlayerQRUI();
+    }
+
+    private void setPlayerQRVisible(boolean visible) {
+        playerQRVisible = visible;
+        updatePlayerQRUI();
     }
 
     // ======================== Mode Switching ========================
@@ -694,8 +787,11 @@ public class KaraokeActivity extends BaseActivity {
         llSelectLayer.setVisibility(View.VISIBLE);
         llQRCode.setVisibility(View.VISIBLE);
 
-        // Hide the in-player QR — the select layer has its own ivQRCode.
-        mController.setPlayerQRVisible(false);
+        // Hide the in-player QR — the select layer has its own ivQRCode. Also kill
+        // the marquee bar so SELECT doesn't show a PLAY-mode overlay.
+        setPlayerQRVisible(false);
+        marqueeOn = false;
+        updateMarqueeUI(null, null);
 
         updateNowPlayingText();
         updateStartPlayButton();
@@ -729,10 +825,14 @@ public class KaraokeActivity extends BaseActivity {
         // Show the in-player QR (top-right corner) and refresh the bitmap so it
         // reflects the current LAN IP even if it changed since SELECT. If the
         // address isn't resolvable (ControlManager not bound), keep the corner
-        // empty rather than drawing a broken / stale QR.
+        // empty rather than drawing a broken / stale QR. The marquee bar is on
+        // the same z-layer as the QR — both are owned by the activity now, not
+        // the controller, so they keep screen-sized bounds when mVideoView is
+        // GONE in audio-only mode.
+        marqueeOn = true;
         Bitmap qrBitmap = buildKaraokeQRBitmap();
-        mController.setPlayerQR(qrBitmap);
-        mController.setPlayerQRVisible(qrBitmap != null);
+        setPlayerQR(qrBitmap);
+        setPlayerQRVisible(qrBitmap != null);
 
         // SELECT → PLAY with the same song that has a saved pause position → resume
         // without relaunching the player.
@@ -743,7 +843,7 @@ public class KaraokeActivity extends BaseActivity {
             mVideoView.setVisibility(currentIsAudioOnly ? View.GONE : View.VISIBLE);
             mVideoView.seekTo(lastPlaybackPosition);
             mVideoView.start();
-            mController.setSongTitle(currentPlayingSong.displayName);
+            setSongTitle(currentPlayingSong.displayName);
             pushNextUpToController();
             // Re-evaluate audio-only UI in case the toggle changed while paused
             applyAudioOnlyUi(currentIsAudioOnly);
@@ -760,7 +860,7 @@ public class KaraokeActivity extends BaseActivity {
             playSong(song);
         } else {
             mVideoView.setVisibility(currentIsAudioOnly ? View.GONE : View.VISIBLE);
-            mController.setSongTitle(song.displayName);
+            setSongTitle(song.displayName);
             pushNextUpToController();
         }
     }
@@ -1253,8 +1353,8 @@ public class KaraokeActivity extends BaseActivity {
         if (!currentIsAudioOnly) mVideoView.setVisibility(View.VISIBLE);
         mVideoView.start();
         if (lastPlaybackPosition > 0) mVideoView.seekTo(lastPlaybackPosition);
-        mController.setSongTitle(song.displayName);
-        mController.setTrackInfo("");
+        setSongTitle(song.displayName);
+        setTrackInfo("");
         queueAdapter.setCurrentlyPlaying(session.getCurrentQueueIndex());
         pushNextUpToController();
         recordKaraokeHistory(song, lastPlaybackPosition);
@@ -1345,7 +1445,7 @@ public class KaraokeActivity extends BaseActivity {
                 updateNowPlayingText();
                 updateStartPlayButton();
                 if (currentMode == Mode.PLAY) {
-                    mController.setNextUp(Collections.emptyList());
+                    updateMarqueeUI(null, null);
                     enterSelectMode();
                 }
                 break;
@@ -2123,7 +2223,7 @@ public class KaraokeActivity extends BaseActivity {
             final long progress = absPlayer.getCurrentPosition();
             trackPlayer.setTrack(nextTrack.trackId);
             savedAudioTrackId = nextTrack.trackId;
-            mController.setTrackInfo(nextTrack.name);
+            setTrackInfo(nextTrack.name);
             Toast.makeText(mContext,
                     String.format(getString(R.string.karaoke_toast_track_switched),
                             nextTrack.name != null ? nextTrack.name : ""),
@@ -2622,7 +2722,7 @@ public class KaraokeActivity extends BaseActivity {
         if (target == null) return false;
         try {
             trackPlayer.setTrack(target.trackId);
-            mController.setTrackInfo(target.name);
+            setTrackInfo(target.name);
             return true;
         } catch (Exception e) {
             e.printStackTrace();
