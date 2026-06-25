@@ -72,9 +72,9 @@ public class KaraokeController extends BaseVideoController {
     // handleDpadHorizontal would be re-entered, the seek pulse state would be reset,
     // and the final UP could be misrouted to the single-tap branch, dropping the
     // tvSlideStop() commit.
-    private static final long LONG_PRESS_THRESHOLD_MS = 250;
-    private static final long DOUBLE_TAP_WINDOW_MS = 300;
-    private static final long SEEK_PULSE_INTERVAL_MS = 100;
+    public static final long LONG_PRESS_THRESHOLD_MS = 250;
+    public static final long DOUBLE_TAP_WINDOW_MS = 300;
+    public static final long SEEK_PULSE_INTERVAL_MS = 100;
     private final Handler dpadGestureHandler = new Handler(Looper.getMainLooper());
     private long lastLeftTapMs = 0;
     private long lastRightTapMs = 0;
@@ -366,6 +366,24 @@ public class KaraokeController extends BaseVideoController {
     private void cancelSeekState() {
         // Mirror hide()'s gesture teardown — on STATE_ERROR / STATE_PREPARING / etc the
         // controller is being reset while a long-press pulse may still be running.
+        cancelDpadGesture();
+        if (simSlideStart) {
+            simSlideStart = false;
+            simSeekPosition = 0;
+            simSlideOffset = 0;
+        }
+        hideSeekOverlay();
+        seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
+    }
+
+    /**
+     * Discard any in-progress seek WITHOUT committing it to the player. Use this when
+     * leaving PLAY mode (e.g. switching to SELECT) so the controller doesn't restart
+     * playback via the {@code wasPlayingBeforeSeek} path in {@link #tvSlideStop()}.
+     * Unlike {@link #tvSlideStop()}, this method does not call {@code seekTo} or
+     * {@code start()} — the player is left at its current position.
+     */
+    public void abandonSeek() {
         cancelDpadGesture();
         if (simSlideStart) {
             simSlideStart = false;
