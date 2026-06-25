@@ -621,23 +621,32 @@ public class KaraokeActivity extends BaseActivity {
 
     /**
      * Builds the up-to-3 next-up title list from the session queue and pushes it to the controller.
+     * Also drives the top-bar marquee: "当前播放：{current}　　下一首：{next}".
      */
     private void pushNextUpToController() {
         if (session == null) {
             mController.setNextUp(Collections.emptyList());
+            mController.setMarqueeText("", "");
             return;
         }
         List<KaraokeSong> queue = session.getQueue();
         int curr = session.getCurrentQueueIndex();
         List<String> next = new ArrayList<>();
+        String nextTitle = null;
         if (queue != null && curr >= 0) {
             for (int i = curr + 1; i < queue.size() && next.size() < 3; i++) {
                 KaraokeSong s = queue.get(i);
                 if (s == null) continue;
-                next.add(s.displayName != null ? s.displayName : s.title);
+                String dn = s.displayName != null ? s.displayName : s.title;
+                if (next.isEmpty()) nextTitle = dn;
+                next.add(dn);
             }
         }
         mController.setNextUp(next);
+        String currentTitle = currentPlayingSong != null
+                ? (currentPlayingSong.displayName != null ? currentPlayingSong.displayName : currentPlayingSong.title)
+                : "";
+        mController.setMarqueeText(currentTitle, nextTitle);
     }
 
     // ======================== Mode Switching ========================
@@ -685,6 +694,9 @@ public class KaraokeActivity extends BaseActivity {
         llSelectLayer.setVisibility(View.VISIBLE);
         llQRCode.setVisibility(View.VISIBLE);
 
+        // Hide the in-player QR — the select layer has its own ivQRCode.
+        mController.setPlayerQRVisible(false);
+
         updateNowPlayingText();
         updateStartPlayButton();
         updateQueueTabCount();
@@ -713,6 +725,14 @@ public class KaraokeActivity extends BaseActivity {
         userPaused = false;
         llSelectLayer.setVisibility(View.GONE);
         llQRCode.setVisibility(View.GONE);
+
+        // Show the in-player QR (top-right corner) and refresh the bitmap so it
+        // reflects the current LAN IP even if it changed since SELECT. If the
+        // address isn't resolvable (ControlManager not bound), keep the corner
+        // empty rather than drawing a broken / stale QR.
+        Bitmap qrBitmap = buildKaraokeQRBitmap();
+        mController.setPlayerQR(qrBitmap);
+        mController.setPlayerQRVisible(qrBitmap != null);
 
         // SELECT → PLAY with the same song that has a saved pause position → resume
         // without relaunching the player.
@@ -1329,11 +1349,27 @@ public class KaraokeActivity extends BaseActivity {
     // ======================== UI Helpers ========================
 
     private void generateQRCode() {
-        String address = ControlManager.get().getAddress(false) + "karaoke";
-        Bitmap bitmap = QRCodeGen.generateBitmap(address, 240, 240, 1);
+        Bitmap bitmap = buildKaraokeQRBitmap();
+        if (ivQRCode == null) return;
         if (bitmap != null) {
             ivQRCode.setImageBitmap(bitmap);
+        } else {
+            // No valid address yet — clear any stale QR from a previous session.
+            ivQRCode.setImageDrawable(null);
         }
+    }
+
+    /**
+     * Build the QR bitmap that points at the embedded remote URL
+     * ({@code http://<lan-ip>:9978/karaoke}). Returns null if the address
+     * isn't available yet (ControlManager not initialized or remote server
+     * not bound) — callers should treat null as "no QR" and hide the container.
+     */
+    private Bitmap buildKaraokeQRBitmap() {
+        String base = ControlManager.get().getAddress(false);
+        if (base == null || base.isEmpty()) return null;
+        String address = base + "karaoke";
+        return QRCodeGen.generateBitmap(address, 240, 240, 1);
     }
 
     private void switchTab(Tab tab) {
