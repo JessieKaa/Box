@@ -376,6 +376,24 @@ public class KaraokeController extends BaseVideoController {
         seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
     }
 
+    /**
+     * Discard any in-progress seek WITHOUT committing it to the player. Use this when
+     * leaving PLAY mode (e.g. switching to SELECT) so the controller doesn't restart
+     * playback via the {@code wasPlayingBeforeSeek} path in {@link #tvSlideStop()}.
+     * Unlike {@link #tvSlideStop()}, this method does not call {@code seekTo} or
+     * {@code start()} — the player is left at its current position.
+     */
+    public void abandonSeek() {
+        cancelDpadGesture();
+        if (simSlideStart) {
+            simSlideStart = false;
+            simSeekPosition = 0;
+            simSlideOffset = 0;
+        }
+        hideSeekOverlay();
+        seekOverlayHandler.removeCallbacks(hideSeekOverlayRunnable);
+    }
+
     // ======================== Fast-forward / Rewind ========================
 
     public void tvSlideStart(int dir) {

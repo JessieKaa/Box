@@ -937,7 +937,10 @@ public class KaraokeActivity extends BaseActivity {
 
         // Tear down any in-flight PLAY-mode touch gesture (pending long-press timer,
         // seek pulse, single-tap callback) so it can't fire on the SELECT screen.
-        cancelTouchGestureState();
+        // commit=false: video was just paused above; calling tvSlideStop() would
+        // restart playback via controller's wasPlayingBeforeSeek path. Use abandonSeek
+        // instead so the partial seek is discarded cleanly.
+        cancelTouchGestureState(false);
 
         updateNowPlayingText();
         updateStartPlayButton();
@@ -2475,7 +2478,7 @@ public class KaraokeActivity extends BaseActivity {
 
         // 双指单击 → 切音轨(优先级最高,且吞掉后续 UP 的 tap 触发)
         if (pointerCount >= 2 && action == MotionEvent.ACTION_POINTER_DOWN) {
-            cancelTouchGestureState();
+            cancelTouchGestureState(true);
             multiPointerTriggered = true;
             switchAudioTrack();
             mController.show();
@@ -2515,8 +2518,7 @@ public class KaraokeActivity extends BaseActivity {
                 // 不应该走到这里(multiPointerTriggered 已拦截),防御性消费
                 return true;
 
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL: {
+            case MotionEvent.ACTION_UP: {
                 mainHandler.removeCallbacks(touchLongArmRunnable);
                 if (touchLongArmed) {
                     mainHandler.removeCallbacks(touchLongPulseRunnable);
@@ -2549,21 +2551,38 @@ public class KaraokeActivity extends BaseActivity {
                 touchLongDir = 0;
                 return true;
             }
+
+            case MotionEvent.ACTION_CANCEL:
+                // System/parent canceled the gesture — don't fire tap actions, don't
+                // schedule single-tap. If a long-press was confirmed, commit the seek
+                // so user intent isn't lost. enterSelectMode path uses commit=false
+                // separately to avoid restarting playback via tvSlideStop.
+                cancelTouchGestureState(true);
+                return true;
         }
         return false;
     }
 
     /**
      * 取消所有 touch gesture pending 状态。用于:
+     *   - ACTION_CANCEL(系统拦截手势)
      *   - 多指抢占时清掉 pending long-press / single-tap
-     *   - enterSelectMode 切换时(避免悬挂的长按定时器在 SELECT 模式触发)
+     *   - enterSelectMode 切换时(commit=false,避免 tvSlideStop 重启播放)
+     *
+     * @param commitSeekIfArmed true → 若长按已 armed,tvSlideStop() 提交 seek(可能恢复播放);
+     *                          false → abandonSeek() 仅清 controller 的 simSlideStart 状态,
+     *                                  不调 seekTo/start(用于 SELECT 切换,video 已 pause 场景)
      */
-    private void cancelTouchGestureState() {
+    private void cancelTouchGestureState(boolean commitSeekIfArmed) {
         mainHandler.removeCallbacks(touchSingleTapRunnable);
         mainHandler.removeCallbacks(touchLongArmRunnable);
         mainHandler.removeCallbacks(touchLongPulseRunnable);
         if (touchLongArmed) {
-            mController.tvSlideStop();
+            if (commitSeekIfArmed) {
+                mController.tvSlideStop();
+            } else {
+                mController.abandonSeek();
+            }
         }
         touchLongArmed = false;
         touchLongDir = 0;
