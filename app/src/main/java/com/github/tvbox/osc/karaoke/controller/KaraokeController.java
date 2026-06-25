@@ -1,6 +1,7 @@
 package com.github.tvbox.osc.karaoke.controller;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.KeyEvent;
@@ -58,6 +59,17 @@ public class KaraokeController extends BaseVideoController {
     private TextView tvNextUp2;
     private TextView tvNextUp3;
     private TextView tvNextUpEmpty;
+
+    // Mobile remote QR (top-right, PLAY mode). Shares the corner with the
+    // deprecated llNextUp; only one of them is ever visible at a time.
+    private LinearLayout llPlayerQR;
+    private ImageView ivPlayerQR;
+    private boolean playerQRVisible = false;
+
+    // Cached marquee text — used to skip setText + setSelected reset when
+    // the resolved "current / next" pair hasn't changed, so queue refreshes
+    // don't restart a long-title scroll mid-flight.
+    private String lastMarqueeText = null;
 
     // Fast-forward / rewind state
     private boolean simSlideStart = false;
@@ -127,6 +139,9 @@ public class KaraokeController extends BaseVideoController {
         tvNextUp3 = findViewById(R.id.tvNextUp3);
         tvNextUpEmpty = findViewById(R.id.tvNextUpEmpty);
         setNextUp(null);
+
+        llPlayerQR = findViewById(R.id.llPlayerQR);
+        ivPlayerQR = findViewById(R.id.ivPlayerQR);
 
         findViewById(R.id.ivPrev).setOnClickListener(new OnClickListener() {
             @Override
@@ -257,10 +272,67 @@ public class KaraokeController extends BaseVideoController {
 
     public void setSongTitle(String title) {
         tvSongTitle.setText(title);
+        // Direct-write bypasses the marquee cache; clear it so the next
+        // setMarqueeText() re-applies even if the resolved text matches the
+        // previous one. Without this, PLAY paths that call setSongTitle()
+        // then pushNextUpToController() would leave the bar on a stale
+        // non-marquee title.
+        lastMarqueeText = null;
     }
 
     public void setTrackInfo(String info) {
         tvTrackInfo.setText(info);
+    }
+
+    /**
+     * Marquee text for the top bar. Format: "当前播放：{current}　　下一首：{next}".
+     * Pass {@code next} as null / empty to show the "no next song" hint.
+     * The TextView must be in the SELECTED state for marquee to scroll.
+     * If the resolved text is identical to the last call, this is a no-op —
+     * repeated queue refreshes won't restart a long-title scroll.
+     */
+    public void setMarqueeText(String currentTitle, String nextTitle) {
+        String current = currentTitle == null ? "" : currentTitle;
+        String nextDisplay;
+        if (nextTitle == null || nextTitle.trim().isEmpty()) {
+            nextDisplay = getContext().getString(R.string.karaoke_no_next_song);
+        } else {
+            nextDisplay = nextTitle;
+        }
+        String text = getContext().getString(
+                R.string.karaoke_now_playing_marquee, current, nextDisplay);
+        if (text.equals(lastMarqueeText)) return;
+        lastMarqueeText = text;
+        tvSongTitle.setText(text);
+        // Re-trigger the marquee so a fresh text starts scrolling from the head.
+        tvSongTitle.setSelected(false);
+        tvSongTitle.setSelected(true);
+    }
+
+    /**
+     * Set the QR bitmap for the player-mode remote control entry. Pass null to clear.
+     * The container is shown/hidden via {@link #setPlayerQRVisible(boolean)} — callers
+     * should set the bitmap first, then toggle visibility.
+     */
+    public void setPlayerQR(Bitmap bitmap) {
+        if (ivPlayerQR == null) return;
+        ivPlayerQR.setImageBitmap(bitmap);
+    }
+
+    /**
+     * Toggle the player-mode QR container. When visible, it claims the top-right
+     * corner that was previously used by {@code llNextUp}; the deprecated overlay
+     * is forced GONE here so the two never compete.
+     */
+    public void setPlayerQRVisible(boolean visible) {
+        this.playerQRVisible = visible;
+        if (llNextUp != null) llNextUp.setVisibility(GONE);
+        if (llPlayerQR == null) return;
+        if (visible && mShowing) {
+            llPlayerQR.setVisibility(VISIBLE);
+        } else {
+            llPlayerQR.setVisibility(GONE);
+        }
     }
 
     public void setPlaying(boolean playing) {
@@ -291,7 +363,12 @@ public class KaraokeController extends BaseVideoController {
     public void show() {
         llTopBar.setVisibility(VISIBLE);
         llBottomBar.setVisibility(VISIBLE);
-        llNextUp.setVisibility(VISIBLE);
+        // llNextUp is intentionally kept GONE — the marquee top bar now carries
+        // the "current + next" info, and the top-right corner belongs to llPlayerQR.
+        if (llNextUp != null) llNextUp.setVisibility(GONE);
+        if (llPlayerQR != null && playerQRVisible) {
+            llPlayerQR.setVisibility(VISIBLE);
+        }
         mShowing = true;
         resetAutoHide();
     }
@@ -301,7 +378,8 @@ public class KaraokeController extends BaseVideoController {
         if (mShowing) {
             llTopBar.setVisibility(GONE);
             llBottomBar.setVisibility(GONE);
-            llNextUp.setVisibility(GONE);
+            if (llNextUp != null) llNextUp.setVisibility(GONE);
+            if (llPlayerQR != null) llPlayerQR.setVisibility(GONE);
             mShowing = false;
             hideHandler.removeCallbacks(autoHideRunnable);
         }

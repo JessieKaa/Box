@@ -38,6 +38,9 @@
     <string name="karaoke_play_error">Playback error, skipping to next</string>
     <string name="karaoke_no_more">No more songs</string>
     <string name="karaoke_next_up">Up next</string>
+    <string name="karaoke_now_playing_marquee">Now playing: %1$s　　Up next: %2$s</string>
+    <string name="karaoke_no_next_song">(end of queue)</string>
+    <string name="karaoke_qr_remote_label">Scan to remote</string>
     <string name="karaoke_continue_play">Continue</string>
     <string name="karaoke_pick_folder">Select MV Folder</string>
     <string name="karaoke_confirm">OK</string>

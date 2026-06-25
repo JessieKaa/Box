@@ -38,6 +38,9 @@
     <string name="karaoke_play_error">播放出错，跳到下一首</string>
     <string name="karaoke_no_more">没有更多歌曲了</string>
 <string name="karaoke_next_up">接下来</string>
+    <string name="karaoke_now_playing_marquee">当前播放：%1$s　　下一首：%2$s</string>
+    <string name="karaoke_no_next_song">（已到最后一首）</string>
+    <string name="karaoke_qr_remote_label">手机扫码遥控</string>
     <string name="karaoke_continue_play">继续播放</string>
     <string name="karaoke_pick_folder">选择MV文件夹</string>
     <string name="karaoke_confirm">确定</string>
