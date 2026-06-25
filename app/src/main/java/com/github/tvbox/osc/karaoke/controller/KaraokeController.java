@@ -72,9 +72,9 @@ public class KaraokeController extends BaseVideoController {
     // handleDpadHorizontal would be re-entered, the seek pulse state would be reset,
     // and the final UP could be misrouted to the single-tap branch, dropping the
     // tvSlideStop() commit.
-    private static final long LONG_PRESS_THRESHOLD_MS = 250;
-    private static final long DOUBLE_TAP_WINDOW_MS = 300;
-    private static final long SEEK_PULSE_INTERVAL_MS = 100;
+    public static final long LONG_PRESS_THRESHOLD_MS = 250;
+    public static final long DOUBLE_TAP_WINDOW_MS = 300;
+    public static final long SEEK_PULSE_INTERVAL_MS = 100;
     private final Handler dpadGestureHandler = new Handler(Looper.getMainLooper());
     private long lastLeftTapMs = 0;
     private long lastRightTapMs = 0;

@@ -11,6 +11,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -185,6 +186,57 @@ public class KaraokeActivity extends BaseActivity {
         public void run() {
             showMarqueeUI();
             mainHandler.postDelayed(cycleHideRunnable, CYCLE_SHOW_MS);
+        }
+    };
+
+    // ===== PLAY 模式触屏手势 =====
+    // 时间常数复用 KaraokeController(LONG_PRESS_THRESHOLD_MS / DOUBLE_TAP_WINDOW_MS / SEEK_PULSE_INTERVAL_MS),
+    // 单一事实源 —— 已把 controller 这 3 个常量从 private 改为 package-private。
+    //
+    // 状态机:
+    //   - DOWN: 取消 pending single-tap 回调 + arm long-press 定时器。
+    //   - 250ms 内 UP: 单击候选 → 记录 lastTouchTapMs + schedule singleTapRunnable。
+    //   - 250ms 到时: 长按生效,启动 seek 脉冲。
+    //   - 长按期间 UP: tvSlideStop 提交 seek。
+    //   - 下一指 DOWN 在 DOUBLE_TAP_WINDOW_MS 内 + 同区: 双击 → playPrevious/playNext + 清 lastTouchTapMs
+    //     (singleTapRunnable 看到 0 时 no-op)。
+    //   - 多指(POINTER_DOWN 且 pointerCount>=2): 设 multiPointerTriggered,切音轨;后续 UP 跳过 tap。
+    private long lastTouchTapMs = 0;          // 上一次 single-tap UP 时间戳(用于双击窗口判定)
+    private float lastTouchTapX = 0;          // 上一次 single-tap 的 x(用于判定同区双击)
+    private boolean touchLongArmed = false;   // 长按已触发(避免 UP 时再当 tap)
+    private int touchLongDir = 0;             // 长按方向: -1=左, 1=右, 0=未长按
+    private boolean multiPointerTriggered = false;  // 双指切音轨已触发,后续 UP 跳过 tap
+
+    // single-tap 延迟回调必须是字段(不能是局部 lambda),这样 DOWN 时能 removeCallbacks 取消
+    // —— 否则用户按下后 250ms 长按期间,旧 single-tap 回调可能在 300ms 时误触发 togglePlayPause。
+    // 用匿名内部类而非 lambda: 字段初始化器里的 lambda 会被 JLS §8.3.3 当作"简单名前向引用"拒绝。
+    private final Runnable touchSingleTapRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (lastTouchTapMs > 0) {
+                lastTouchTapMs = 0;
+                togglePlayPause();
+                mController.show();
+                resetMarqueeCycle();
+            }
+        }
+    };
+    private final Runnable touchLongPulseRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (touchLongArmed && touchLongDir != 0) {
+                mController.tvSlideStart(touchLongDir);
+                mainHandler.postDelayed(this, KaraokeController.SEEK_PULSE_INTERVAL_MS);
+            }
+        }
+    };
+    private final Runnable touchLongArmRunnable = new Runnable() {
+        @Override
+        public void run() {
+            // 250ms 内没 UP → 长按生效
+            touchLongArmed = true;
+            mController.tvSlideStart(touchLongDir);
+            mainHandler.postDelayed(touchLongPulseRunnable, KaraokeController.SEEK_PULSE_INTERVAL_MS);
         }
     };
 
@@ -882,6 +934,10 @@ public class KaraokeActivity extends BaseActivity {
         marqueeOn = false;
         updateMarqueeUI(null, null);
         stopMarqueeCycle();
+
+        // Tear down any in-flight PLAY-mode touch gesture (pending long-press timer,
+        // seek pulse, single-tap callback) so it can't fire on the SELECT screen.
+        cancelTouchGestureState();
 
         updateNowPlayingText();
         updateStartPlayButton();
@@ -2389,6 +2445,130 @@ public class KaraokeActivity extends BaseActivity {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    // ======================== Touch Handling (PLAY mode) ========================
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (currentMode == Mode.PLAY && handlePlayModeTouch(ev)) {
+            return true;
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    /**
+     * PLAY 模式触屏手势分发。返回 true 表示消费(不下发到子 view)。
+     * SELECT 模式直接走 super,所有触屏交互透传到子 view。
+     *
+     * 手势 → 行为映射(对齐 DPAD 遥控器):
+     *   - 中央单击     → togglePlayPause (= DPAD_CENTER)
+     *   - 左半双击     → playPrevious    (= DPAD_LEFT 双击)
+     *   - 右半双击     → playNext        (= DPAD_RIGHT 双击)
+     *   - 左半长按     → tvSlideStart(-1) 脉冲 + tvSlideStop  (= DPAD_LEFT 长按)
+     *   - 右半长按     → tvSlideStart(+1) 脉冲 + tvSlideStop  (= DPAD_RIGHT 长按)
+     *   - 双指单击     → switchAudioTrack (= DPAD_UP)
+     */
+    private boolean handlePlayModeTouch(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        int pointerCount = ev.getPointerCount();
+
+        // 双指单击 → 切音轨(优先级最高,且吞掉后续 UP 的 tap 触发)
+        if (pointerCount >= 2 && action == MotionEvent.ACTION_POINTER_DOWN) {
+            cancelTouchGestureState();
+            multiPointerTriggered = true;
+            switchAudioTrack();
+            mController.show();
+            resetMarqueeCycle();
+            return true;
+        }
+
+        // 多指抢占后,任何后续 UP/POINTER_UP 都只清 flag,不走 tap/long-press 分支
+        if (multiPointerTriggered) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                multiPointerTriggered = false;
+            }
+            return true;
+        }
+
+        float x = ev.getX();
+        int width = getWindow().getDecorView().getWidth();
+        boolean isLeft = x < width / 2f;
+        boolean isRight = !isLeft;
+
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+                // 取消 pending single-tap 回调。否则用户按下后 250ms 长按期间,
+                // 上一指的 togglePlayPause 回调(300ms 时)可能误触发。
+                mainHandler.removeCallbacks(touchSingleTapRunnable);
+                touchLongDir = isLeft ? -1 : 1;
+                mainHandler.removeCallbacks(touchLongArmRunnable);
+                mainHandler.postDelayed(touchLongArmRunnable,
+                        KaraokeController.LONG_PRESS_THRESHOLD_MS);
+                return true;
+
+            case MotionEvent.ACTION_MOVE:
+                // 不做 touchSlop 检测;长按期间允许微抖动
+                return true;
+
+            case MotionEvent.ACTION_POINTER_UP:
+                // 不应该走到这里(multiPointerTriggered 已拦截),防御性消费
+                return true;
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                mainHandler.removeCallbacks(touchLongArmRunnable);
+                if (touchLongArmed) {
+                    mainHandler.removeCallbacks(touchLongPulseRunnable);
+                    mController.tvSlideStop();
+                    touchLongArmed = false;
+                    touchLongDir = 0;
+                    mController.show();
+                    resetMarqueeCycle();
+                    return true;
+                }
+                long now = System.currentTimeMillis();
+                boolean sameZoneAsLast = (lastTouchTapMs > 0)
+                        && ((isLeft && lastTouchTapX < width / 2f)
+                            || (isRight && lastTouchTapX >= width / 2f));
+                if (sameZoneAsLast
+                        && now - lastTouchTapMs <= KaraokeController.DOUBLE_TAP_WINDOW_MS) {
+                    if (isLeft) playPrevious();
+                    else playNext();
+                    lastTouchTapMs = 0;
+                    mainHandler.removeCallbacks(touchSingleTapRunnable);
+                    mController.show();
+                    resetMarqueeCycle();
+                } else {
+                    lastTouchTapMs = now;
+                    lastTouchTapX = x;
+                    mainHandler.removeCallbacks(touchSingleTapRunnable);
+                    mainHandler.postDelayed(touchSingleTapRunnable,
+                            KaraokeController.DOUBLE_TAP_WINDOW_MS);
+                }
+                touchLongDir = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 取消所有 touch gesture pending 状态。用于:
+     *   - 多指抢占时清掉 pending long-press / single-tap
+     *   - enterSelectMode 切换时(避免悬挂的长按定时器在 SELECT 模式触发)
+     */
+    private void cancelTouchGestureState() {
+        mainHandler.removeCallbacks(touchSingleTapRunnable);
+        mainHandler.removeCallbacks(touchLongArmRunnable);
+        mainHandler.removeCallbacks(touchLongPulseRunnable);
+        if (touchLongArmed) {
+            mController.tvSlideStop();
+        }
+        touchLongArmed = false;
+        touchLongDir = 0;
+        lastTouchTapMs = 0;
+        multiPointerTriggered = false;
     }
 
     private static int keyCodeToFocusDirection(int keyCode) {
