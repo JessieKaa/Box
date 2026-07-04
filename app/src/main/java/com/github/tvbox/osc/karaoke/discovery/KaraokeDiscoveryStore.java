@@ -202,16 +202,11 @@ public final class KaraokeDiscoveryStore {
 
     public static boolean recomputeEffectiveEndpoint(boolean clearWhenUnavailable) {
         String mode = Hawk.get(HawkConfig.KARAOKE_SERVER_SELECTION_MODE, "manual");
-        if ("manual".equals(mode)) {
-            ParsedManualEndpoint parsed = parseManualEndpoint(Hawk.get(HawkConfig.KARAOKE_MANUAL_API_URL, ""));
-            if (parsed != null) {
-                applyEffectiveEndpoint(parsed.origin, parsed.apiPath);
-                return true;
-            }
-            if (clearWhenUnavailable) {
-                clearEffectiveEndpoint();
-            }
-            return false;
+        String manualUrl = Hawk.get(HawkConfig.KARAOKE_MANUAL_API_URL, "");
+        ParsedManualEndpoint manualEndpoint = parseManualEndpoint(manualUrl);
+        if ("manual".equals(mode) && manualEndpoint != null) {
+            applyEffectiveEndpoint(manualEndpoint.origin, manualEndpoint.apiPath);
+            return true;
         }
 
         String selectedId = Hawk.get(HawkConfig.KARAOKE_SELECTED_SERVER_ID, "");

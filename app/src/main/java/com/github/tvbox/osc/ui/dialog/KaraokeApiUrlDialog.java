@@ -42,7 +42,7 @@ public class KaraokeApiUrlDialog extends BaseDialog {
                 }
                 if (url.isEmpty()) {
                     Hawk.put(HawkConfig.KARAOKE_MANUAL_API_URL, "");
-                    Hawk.put(HawkConfig.KARAOKE_SERVER_SELECTION_MODE, "manual");
+                    Hawk.put(HawkConfig.KARAOKE_SERVER_SELECTION_MODE, "discovered");
                     KaraokeDiscoveryStore.recomputeEffectiveEndpoint(true);
                     if (listener != null) listener.onchange(url);
                     dismiss();
